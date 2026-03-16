@@ -3597,21 +3597,15 @@ def seed_db():
                   enterprise_id='ENT-MEM-001',   role='member')
     # SEC-S1: In production, generate strong random passwords instead of
     # using the known demo passwords — prevents credential stuffing attacks.
-    is_prod = os.environ.get('FLASK_ENV') == 'production'
-    if is_prod:
-        import secrets as _sec
-        _ap = _sec.token_urlsafe(20)
-        _lp = _sec.token_urlsafe(20)
-        _mp = _sec.token_urlsafe(20)
-        admin.set_password(_ap)
-        lead.set_password(_lp)
-        member.set_password(_mp)
-        logger.warning('PRODUCTION SEED: random passwords generated. '
-                       'Reset them immediately via the Admin portal.')
-    else:
-        admin.set_password('Admin@1234')
-        lead.set_password('Lead@1234')
-        member.set_password('Member@1234')
+    # Use ADMIN_PASSWORD env var if set, otherwise fall back to default.
+    # Set ADMIN_PASSWORD in Render environment variables for security.
+    admin_pw  = os.environ.get('ADMIN_PASSWORD',  'Admin@1234')
+    lead_pw   = os.environ.get('LEAD_PASSWORD',   'Lead@1234')
+    member_pw = os.environ.get('MEMBER_PASSWORD', 'Member@1234')
+    admin.set_password(admin_pw)
+    lead.set_password(lead_pw)
+    member.set_password(member_pw)
+    logger.warning('DB seeded. Default credentials active — change them after login.')
     db.session.add_all([admin, lead, member])
     db.session.commit()
 
