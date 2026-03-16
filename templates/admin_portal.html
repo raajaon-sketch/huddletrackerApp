@@ -1,0 +1,2293 @@
+<!DOCTYPE html>
+<!--
+  admin_portal.html — Admin Portal Single-Page Application
+  =========================================================
+  Served by the Flask /admin route (admin and lead roles only).
+
+  Architecture
+  ────────────
+  This is a self-contained SPA: all page sections (views) live in the DOM
+  simultaneously and are toggled visible/hidden via CSS (.vs / showView()).
+  Data is fetched from the JSON REST API in app.py; the UI is never reloaded.
+
+  View sections (id="vs-*")
+  ─────────────────────────
+    vs-dashboard    — headline stats, recent activity, charts, TAT warnings
+    vs-tasks        — full task table with filters, bulk actions, and import
+    vs-projects     — project cards with CRUD and member assignment
+    vs-users        — user table with create / edit / deactivate
+    vs-task-names   — task name lookup table management (import from xlsx)
+    vs-processes    — mapping process master list (CRUD)
+    vs-analytics    — calendar heat-map + daily drill-down
+    vs-notifications — SMTP config, test email, overdue preview
+
+  Real-time updates
+  ─────────────────
+  initSSE() opens a persistent EventSource to GET /api/stream.
+  On 'task_created', 'task_updated', 'task_deleted' events the affected
+  local arrays (allTasks, etc.) are patched and only the changed rows are
+  re-rendered — no full page reloads.
+
+  Security
+  ────────
+  • CSRF token is read from <meta name="csrf-token"> (set by Jinja) and
+    sent as 'X-CSRF-Token' header on every mutating fetch call.
+  • escHtml() is called on every piece of server-supplied text before it is
+    inserted into innerHTML to prevent stored-XSS.
+  • File uploads validate the magic bytes server-side; the UI merely checks
+    file extension before sending as a first-pass guard.
+
+  Dependencies (CDN-free)
+  ───────────────────────
+  No external JS libraries. Chart rendering uses hand-rolled SVG/canvas.
+  Fonts are loaded from Google Fonts (Syne + DM Sans).
+-->
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="csrf-token" content="{{ csrf_token() }}">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Admin Portal – Huddle</title>
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet">
+<style>
+/* ── CSS custom properties / design tokens ────────────────────────────────────
+   All colours, the sidebar width, and surface values are declared here so
+   changing the brand palette requires editing only this one block.
+
+   --ink    Near-black brand colour (headers, dark buttons, sidebar bg)
+   --paper  Warm off-white page background
+   --accent Coral/orange primary accent (hover states, active nav items)
+   --gold   Gold accent (Switch-portal button, logo dot in emails)
+   --card   Surface colour for panels and table rows
+   --border Subtle separator line colour
+   --muted  Secondary text / placeholder colour
+   --sw     Sidebar width (used by .main margin-left and sidebar itself)
+──────────────────────────────────────────────────────────────────────────── */
+:root{--ink:#0a0a0f;--paper:#f4f1eb;--accent:#ff4d2e;--green:#22c55e;--yellow:#eab308;--blue:#3b82f6;--purple:#a855f7;--red:#ef4444;--gold:#c9a84c;--card:#fff;--border:#e5e3dc;--muted:#888;--sw:248px;}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'DM Sans',sans-serif;background:var(--paper);color:var(--ink);min-height:100vh;display:flex;}
+.sidebar{width:var(--sw);background:var(--ink);display:flex;flex-direction:column;position:fixed;top:0;left:0;bottom:0;z-index:100;overflow:hidden;}
+.sb-brand{padding:22px 20px 16px;border-bottom:1px solid rgba(255,255,255,.07);}
+.sb-logo{font-family:'Syne',sans-serif;font-size:1.45rem;font-weight:800;color:#fff;letter-spacing:-1px;}
+.sb-logo em{color:var(--accent);font-style:normal;}
+.sb-sub{font-size:.6rem;letter-spacing:3px;text-transform:uppercase;color:rgba(255,255,255,.25);margin-top:5px;}
+.sb-user{padding:13px 20px;border-bottom:1px solid rgba(255,255,255,.07);display:flex;align-items:center;gap:10px;}
+.sb-avatar{width:32px;height:32px;border-radius:9px;background:var(--accent);display:flex;align-items:center;justify-content:center;font-family:'Syne',sans-serif;font-weight:700;font-size:.8rem;color:#fff;flex-shrink:0;}
+.sb-uname{font-size:.85rem;font-weight:500;color:#fff;}
+.sb-role{font-size:.68rem;color:rgba(255,255,255,.32);text-transform:capitalize;}
+.sb-nav{padding:10px 10px;flex:1;overflow-y:auto;}
+.nav-lbl{font-size:.58rem;letter-spacing:2.5px;text-transform:uppercase;color:rgba(255,255,255,.22);padding:12px 10px 5px;}
+.ni{display:flex;align-items:center;gap:10px;padding:9px 10px;border-radius:8px;cursor:pointer;color:rgba(255,255,255,.52);font-size:.875rem;transition:all .15s;margin-bottom:1px;text-decoration:none;}
+.ni:hover,.ni.active{background:rgba(255,255,255,.07);color:#fff;}
+.ni.active{color:var(--accent);}
+.ni-icon{width:20px;text-align:center;}
+.sb-foot{padding:14px 20px;border-top:1px solid rgba(255,255,255,.07);display:flex;flex-direction:column;gap:8px;flex-shrink:0;}
+.sw-btn{display:flex;align-items:center;gap:8px;padding:9px 12px;border-radius:8px;background:rgba(201,168,76,.1);border:1px solid rgba(201,168,76,.22);color:var(--gold);font-size:.8rem;cursor:pointer;text-decoration:none;transition:all .15s;}
+.sw-btn:hover{background:rgba(201,168,76,.18);}
+.lo-btn{display:flex;align-items:center;justify-content:center;gap:8px;padding:9px 12px;border-radius:8px;background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.22);color:#f87171;font-size:.8rem;font-weight:500;text-decoration:none;cursor:pointer;transition:all .15s;}
+.lo-btn:hover{background:rgba(239,68,68,.22);color:#fff;border-color:rgba(239,68,68,.5);}
+.main{margin-left:var(--sw);flex:1;display:flex;flex-direction:column;min-height:100vh;}
+.topbar{background:var(--card);border-bottom:1px solid var(--border);padding:13px 26px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:50;}
+.page-title{font-family:'Syne',sans-serif;font-size:1.15rem;font-weight:700;}
+.tb-right{display:flex;gap:8px;align-items:center;}
+.tb-clock{display:flex;flex-direction:column;align-items:flex-end;line-height:1.25;margin-right:4px;}
+.tb-clock .tc-time{font-family:'Syne',sans-serif;font-size:.95rem;font-weight:700;letter-spacing:.5px;color:var(--ink);}
+.tb-clock .tc-date{font-size:.68rem;color:var(--muted);letter-spacing:.3px;}
+.btn{padding:7px 15px;border-radius:8px;font-family:'DM Sans',sans-serif;font-size:.82rem;font-weight:500;cursor:pointer;border:none;transition:all .15s;display:inline-flex;align-items:center;gap:6px;}
+.btn-primary{background:var(--ink);color:#fff;}.btn-primary:hover{background:var(--accent);}
+.btn-outline{background:transparent;border:1.5px solid var(--border);color:var(--ink);}.btn-outline:hover{border-color:var(--ink);}
+.btn-danger{background:var(--red);color:#fff;}.btn-danger:hover{opacity:.85;}
+.btn-success{background:var(--green);color:#fff;}
+.btn-purple{background:var(--purple);color:#fff;}
+.btn-gold{background:var(--gold);color:#0a0a0f;}.btn-gold:hover{opacity:.88;}
+.btn-sm{padding:5px 11px;font-size:.78rem;}
+.content{padding:26px;}
+.stats-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(165px,1fr));gap:13px;margin-bottom:22px;}
+.stat-card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:17px 20px;position:relative;overflow:hidden;}
+.stat-card::before{content:'';position:absolute;top:0;left:0;right:0;height:3px;background:var(--c,var(--accent));}
+.stat-value{font-family:'Syne',sans-serif;font-size:1.85rem;font-weight:800;line-height:1;margin-bottom:4px;}
+.stat-label{font-size:.7rem;color:var(--muted);text-transform:uppercase;letter-spacing:1px;}
+.panels{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:20px;}
+@media(max-width:1080px){.panels{grid-template-columns:1fr}}
+.panel{background:var(--card);border:1px solid var(--border);border-radius:12px;overflow:hidden;margin-bottom:18px;}
+.ph{padding:15px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;}
+.pt{font-family:'Syne',sans-serif;font-weight:700;font-size:.92rem;}
+.tbl-wrap{overflow-x:auto;}
+table{width:100%;border-collapse:collapse;font-size:.83rem;}
+thead th{background:#f9f8f5;padding:10px 15px;text-align:left;font-size:.67rem;text-transform:uppercase;letter-spacing:1px;color:var(--muted);font-weight:500;border-bottom:1px solid var(--border);white-space:nowrap;}
+tbody td{padding:11px 15px;border-bottom:1px solid var(--border);vertical-align:middle;}
+tbody tr:last-child td{border-bottom:none;}
+tbody tr:hover{background:#fafaf8;}
+.mono{font-family:monospace;font-size:.77rem;color:#555;}
+.badge{display:inline-block;padding:2px 9px;border-radius:20px;font-size:.68rem;font-weight:500;text-transform:capitalize;}
+.badge-pending{background:#fef9c3;color:#854d0e;}
+.badge-in_progress{background:#dbeafe;color:#1e40af;}
+.badge-review{background:#f3e8ff;color:#6b21a8;}
+.badge-done{background:#dcfce7;color:#14532d;}
+.badge-blocked{background:#fee2e2;color:#991b1b;}
+.badge-low{background:#f1f5f9;color:#475569;}
+.badge-medium{background:#fef9c3;color:#854d0e;}
+.badge-high{background:#fed7aa;color:#9a3412;}
+.badge-critical{background:#fee2e2;color:#991b1b;}
+.badge-active{background:#dcfce7;color:#14532d;}
+.badge-completed{background:#dbeafe;color:#1e40af;}
+.badge-archived{background:#f1f5f9;color:#475569;}
+.badge-admin{background:#fee2e2;color:#991b1b;}
+.badge-lead{background:#fed7aa;color:#9a3412;}
+.badge-member{background:#dbeafe;color:#1e40af;}
+.badge-inactive{background:#f1f5f9;color:#475569;}
+.pchip{display:inline-block;padding:2px 9px;border-radius:6px;font-size:.7rem;font-weight:600;background:var(--ink);color:#fff;}
+.cap-pill{display:inline-flex;align-items:center;gap:3px;border-radius:20px;padding:2px 9px;font-size:.73rem;font-weight:500;}
+.cap-pill.ok{background:#f0f9ff;color:#0369a1;border:1px solid #bae6fd;}
+.cap-pill.warn{background:#fefce8;color:#854d0e;border:1px solid #fde68a;}
+.cap-pill.danger{background:#fee2e2;color:#991b1b;border:1px solid #fca5a5;}
+.pm-chip{display:inline-flex;align-items:center;gap:5px;background:#f5f3ee;border:1.5px solid var(--border);border-radius:8px;padding:5px 9px;font-size:.8rem;font-weight:500;transition:all .15s;cursor:pointer;}
+.pm-chip:hover{border-color:#aaa;}
+.pm-chip.active{background:var(--ink);color:#fff;border-color:var(--ink);}
+.pm-chip.active .cc{background:rgba(255,255,255,.2);color:rgba(255,255,255,.8);}
+.pm-chip.active .cb.ed{color:rgba(255,255,255,.6);}.pm-chip.active .cb.ed:hover{background:rgba(255,255,255,.15);color:#fff;}
+.pm-chip.active .cb.dl{color:rgba(255,255,255,.4);}.pm-chip.active .cb.dl:hover{background:rgba(239,68,68,.4);color:#fff;}
+.pm-chip .cn{max-width:130px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.pm-chip .cc{font-size:.66rem;background:var(--border);border-radius:20px;padding:1px 5px;color:var(--muted);}
+.pm-chip .cb{border:none;background:none;cursor:pointer;padding:1px 3px;border-radius:3px;font-size:.75rem;line-height:1;transition:background .12s;}
+.pm-chip .cb.ed{color:#777;}.pm-chip .cb.ed:hover{background:#e8e6e0;color:var(--ink);}
+.pm-chip .cb.dl{color:#ccc;}.pm-chip .cb.dl:hover{background:#fee2e2;color:var(--red);}
+.fbar{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px;}
+.fbar input,.fbar select{padding:8px 12px;border:1.5px solid var(--border);border-radius:8px;font-family:'DM Sans',sans-serif;font-size:.83rem;background:var(--card);outline:none;transition:border-color .15s;}
+.fbar input:focus,.fbar select:focus{border-color:var(--ink);}
+.fbar input{flex:1;min-width:180px;}
+.overlay{position:fixed;inset:0;background:rgba(10,10,15,.65);backdrop-filter:blur(4px);z-index:200;display:none;align-items:center;justify-content:center;}
+.overlay.open{display:flex;}
+.modal{background:var(--card);border-radius:16px;width:520px;max-width:95vw;max-height:90vh;overflow-y:auto;box-shadow:0 24px 70px rgba(0,0,0,.3);}
+.modal-lg{width:640px;}
+.mh{padding:20px 24px 0;display:flex;align-items:center;justify-content:space-between;}
+.mt{font-family:'Syne',sans-serif;font-size:1.05rem;font-weight:700;}
+.mc{background:none;border:none;font-size:1.35rem;cursor:pointer;color:var(--muted);line-height:1;}
+.mb{padding:16px 24px 24px;}
+.fr{display:grid;grid-template-columns:1fr 1fr;gap:11px;}
+.fg{margin-bottom:13px;}
+.fg label{display:block;font-size:.72rem;font-weight:500;text-transform:uppercase;letter-spacing:.8px;margin-bottom:5px;}
+.fg input,.fg select,.fg textarea{width:100%;padding:9px 13px;border:1.5px solid var(--border);border-radius:8px;font-family:'DM Sans',sans-serif;font-size:.875rem;outline:none;transition:border-color .15s;}
+.fg input:focus,.fg select:focus,.fg textarea:focus{border-color:var(--accent);}
+.fg textarea{resize:vertical;min-height:68px;}
+.ma{display:flex;gap:8px;justify-content:flex-end;margin-top:6px;}
+.pb{background:#f0ede8;border-radius:4px;height:6px;overflow:hidden;}
+.pf{height:100%;background:var(--accent);border-radius:4px;transition:width .4s;}
+.donut-wrap{display:flex;align-items:center;gap:20px;padding:16px 20px;}
+.donut{position:relative;width:88px;height:88px;flex-shrink:0;}
+.donut svg{transform:rotate(-90deg);}
+.dc{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-family:'Syne',sans-serif;font-weight:800;font-size:1.15rem;}
+.legend{flex:1;display:grid;grid-template-columns:1fr 1fr;gap:7px;}
+.legend-item{display:flex;align-items:center;gap:7px;font-size:.77rem;}
+.ldot{width:8px;height:8px;border-radius:50%;flex-shrink:0;}
+
+.urow{display:flex;align-items:center;gap:13px;padding:14px 18px;border-bottom:1px solid var(--border);}
+.urow:last-child{border-bottom:none;}
+.urow:hover{background:rgba(255,255,255,.025);}
+.uav{width:36px;height:36px;border-radius:9px;background:var(--ink);color:#fff;display:flex;align-items:center;justify-content:center;font-family:'Syne',sans-serif;font-weight:700;font-size:.78rem;flex-shrink:0;}
+.u-info{flex:1;min-width:0;}
+.u-name{font-weight:600;font-size:.88rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.u-meta{font-size:.73rem;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.u-activity{display:flex;gap:6px;align-items:center;flex-shrink:0;}
+.u-day{display:flex;flex-direction:column;align-items:center;gap:2px;min-width:52px;}
+.u-day-lbl{font-size:.6rem;color:var(--muted);text-transform:uppercase;letter-spacing:.4px;white-space:nowrap;}
+.u-day-pill{font-size:.72rem;font-weight:700;padding:3px 10px;border-radius:20px;min-width:32px;text-align:center;}
+.u-day-pill.has-tasks{background:rgba(34,197,94,.15);color:#22c55e;border:1px solid rgba(34,197,94,.3);}
+.u-day-pill.no-tasks{background:rgba(255,255,255,.05);color:var(--muted);border:1px solid var(--border);}
+.u-day-pill.today-has{background:rgba(201,168,76,.15);color:var(--gold);border:1px solid rgba(201,168,76,.3);}
+.users-scroll{max-height:calc(100vh - 180px);overflow-y:auto;}
+.users-scroll::-webkit-scrollbar{width:5px;}
+.users-scroll::-webkit-scrollbar-track{background:transparent;}
+.users-scroll::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px;}
+.users-scroll::-webkit-scrollbar-thumb:hover{background:rgba(255,255,255,.2);}
+.u-divider{display:flex;align-items:center;gap:10px;padding:6px 18px 4px;font-size:.65rem;color:var(--muted);text-transform:uppercase;letter-spacing:.6px;border-bottom:1px solid var(--border);background:rgba(255,255,255,.02);}
+.u-section-title{font-size:.65rem;color:var(--muted);text-transform:uppercase;letter-spacing:.6px;}
+.imp-zone{border:2px dashed var(--border);border-radius:10px;padding:30px;text-align:center;cursor:pointer;transition:all .2s;margin-bottom:12px;}
+.imp-zone:hover,.imp-zone.drag{border-color:var(--accent);background:#fff8f7;}
+.imp-result{padding:10px 13px;border-radius:8px;font-size:.83rem;margin-bottom:10px;display:none;}
+.imp-result.success{background:#dcfce7;color:#14532d;border:1px solid #86efac;}
+.imp-result.error{background:#fee2e2;color:#991b1b;border:1px solid #fca5a5;}
+.imp-result.partial{background:#fef9c3;color:#854d0e;border:1px solid #fde68a;}
+.prev-wrap{max-height:210px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;margin-bottom:11px;}
+.toast{position:fixed;bottom:20px;right:20px;background:var(--ink);color:#fff;padding:10px 18px;border-radius:10px;font-size:.875rem;z-index:999;transform:translateY(80px);opacity:0;transition:all .3s;}
+.toast.show{transform:translateY(0);opacity:1;}
+.vs{display:none;}.vs.active{display:block;}
+.empty{text-align:center;padding:46px 20px;color:var(--muted);}
+.ei{font-size:2.2rem;margin-bottom:8px;opacity:.38;}
+.cal-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:3px;}
+.cal-hdr{font-size:.6rem;text-transform:uppercase;letter-spacing:1px;color:var(--muted);text-align:center;padding:4px 0;font-weight:600;}
+.cal-day{border-radius:8px;padding:5px 4px 4px;min-height:52px;cursor:pointer;transition:all .15s;position:relative;border:1.5px solid transparent;background:#f9f8f5;}
+.cal-day:hover{border-color:var(--ink);background:#fff;}
+.cal-day.empty{background:transparent;cursor:default;border:none;}
+.cal-day.today{border-color:var(--accent)!important;background:#fff8f7;}
+.cal-day.selected{border-color:var(--ink)!important;background:var(--ink);}
+.cal-day.selected .cal-dn{color:#fff;}
+.cal-day.selected .cal-dot{opacity:.85;}
+.cal-day.has-tasks{background:#fff;}
+.cal-dn{font-family:'Syne',sans-serif;font-weight:700;font-size:.75rem;line-height:1;margin-bottom:4px;color:var(--ink);}
+.cal-dots{display:flex;flex-wrap:wrap;gap:2px;margin-top:2px;}
+.cal-dot{width:6px;height:6px;border-radius:50%;}
+.cal-count{font-size:.6rem;color:var(--muted);font-weight:600;margin-top:2px;}
+.day-detail{background:#f9f8f5;border-radius:10px;padding:12px 14px;margin-bottom:12px;border:1.5px solid var(--border);}
+.day-detail-hdr{font-family:'Syne',sans-serif;font-weight:700;font-size:.88rem;margin-bottom:10px;display:flex;align-items:center;justify-content:space-between;}
+.day-task-row{display:flex;align-items:flex-start;gap:8px;padding:7px 0;border-bottom:1px solid var(--border);font-size:.8rem;}
+.day-task-row:last-child{border-bottom:none;}
+.day-flag{display:inline-block;padding:1px 6px;border-radius:4px;font-size:.62rem;font-weight:600;text-transform:uppercase;letter-spacing:.5px;}
+.day-flag.created{background:#dbeafe;color:#1e40af;}
+.day-flag.started{background:#dcfce7;color:#14532d;}
+.day-flag.due{background:#fef9c3;color:#854d0e;}
+
+::-webkit-scrollbar-thumb{background:#d0cdc7;border-radius:3px;}
+
+/* ── Bulk action bar (All Tasks) ── */
+.at-bulk-bar{display:none;align-items:center;gap:8px;padding:9px 18px;background:#fffbf0;border-bottom:1.5px solid rgba(201,168,76,.35);flex-wrap:wrap;}
+.at-bulk-bar.on{display:flex;animation:atFadeIn .15s ease;}
+@keyframes atFadeIn{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:translateY(0)}}
+.at-bulk-count{font-weight:700;font-size:.84rem;color:#7c5c00;}
+.at-bulk-div{width:1px;height:20px;background:var(--border);}
+.at-bulk-sel{padding:5px 9px;border:1.5px solid var(--border);border-radius:7px;font-family:'DM Sans',sans-serif;font-size:.78rem;background:var(--card);outline:none;cursor:pointer;color:var(--ink);}
+/* Inline status/priority dropdowns */
+.il-sel{padding:3px 6px;border:1.5px solid transparent;border-radius:6px;font-family:'DM Sans',sans-serif;font-size:.79rem;background:transparent;outline:none;cursor:pointer;color:var(--ink);transition:border-color .15s,background .15s;}
+.il-sel:hover{border-color:var(--border);background:#fff;}
+.il-sel:focus{border-color:var(--accent);background:#fff;}
+tbody tr.at-sel-row{background:#fffbf0!important;}
+</style>
+</head>
+<body>
+
+<aside class="sidebar">
+  <div class="sb-brand">
+    <div class="sb-logo">Huddle<em>.</em></div>
+    <div class="sb-sub">Admin Portal</div>
+  </div>
+  <div class="sb-user">
+    <div class="sb-avatar">{{ user.username[0].upper() }}</div>
+    <div>
+      <div class="sb-uname">{{ user.username }}</div>
+      <div class="sb-role">{{ user.role }}</div>
+    </div>
+  </div>
+  <nav class="sb-nav">
+    <div class="nav-lbl">Management</div>
+    <div class="ni active" data-view="dashboard" onclick="show('dashboard')"><span class="ni-icon">📊</span>Dashboard</div>
+    <div class="ni" data-view="users" onclick="show('users')"><span class="ni-icon">👥</span>Users</div>
+    <div class="ni" data-view="analytics" onclick="show('analytics')"><span class="ni-icon">📈</span>Analytics</div>
+    <div class="nav-lbl">Configuration</div>
+    <div class="ni" data-view="tasks" onclick="show('tasks')"><span class="ni-icon">📋</span>All Tasks</div>
+    <div class="ni" data-view="tasknames" onclick="show('tasknames')"><span class="ni-icon">🏷️</span>Task Names</div>
+    <div class="ni" data-view="notifications" onclick="show('notifications')"><span class="ni-icon">🔔</span>Notifications</div>
+  </nav>
+  <div class="sb-foot">
+    <a class="sw-btn" href="/huddle">🎯 Switch to Huddle Portal</a>
+    <a class="lo-btn" href="/logout">⏻ Sign Out</a>
+  </div>
+</aside>
+
+<div class="main">
+  <div class="topbar">
+    <div class="page-title" id="pgTitle">Dashboard</div>
+    <div class="tb-clock" id="tbClock">
+      <span class="tc-time" id="tcTime">--:-- --</span>
+      <span class="tc-date" id="tcDate">--- --, ----</span>
+    </div>
+    <div class="tb-right">
+      <button class="btn btn-outline btn-sm" id="bTaskExport" onclick="exportAllTasksPage()" style="display:none">⬇ Export</button>
+      <button class="btn btn-primary btn-sm" id="bNewUser" onclick="openNewUser()" style="display:none">+ User</button>
+      <button class="btn btn-purple btn-sm" id="bImpTN" onclick="openModal('mImport')" style="display:none">📤 Import</button>
+      <button class="btn btn-primary btn-sm" id="bAddTN" onclick="openNewTN()" style="display:none">+ Task Name</button>
+    </div>
+  </div>
+
+  <div class="content">
+
+    <!-- DASHBOARD -->
+    <div class="vs active" id="vs-dashboard">
+      <div class="stats-grid" id="dStats">
+        <div style="padding:14px;color:var(--muted);font-size:.83rem;grid-column:1/-1">⏳ Loading stats…</div>
+      </div>
+      <div class="panels">
+        <div class="panel">
+          <div class="ph"><span class="pt">Task Status</span></div>
+          <div class="donut-wrap">
+            <div class="donut">
+              <svg width="88" height="88" viewBox="0 0 100 100">
+                <circle cx="50" cy="50" r="40" fill="none" stroke="#f0ede8" stroke-width="14"/>
+                <circle id="cDone"  cx="50" cy="50" r="40" fill="none" stroke="#22c55e" stroke-width="14" stroke-dasharray="0 251" stroke-linecap="round"/>
+                <circle id="cPend"  cx="50" cy="50" r="40" fill="none" stroke="#eab308" stroke-width="14" stroke-dasharray="0 251" stroke-linecap="round"/>
+                <circle id="cInpro" cx="50" cy="50" r="40" fill="none" stroke="#3b82f6" stroke-width="14" stroke-dasharray="0 251" stroke-linecap="round"/>
+              </svg>
+              <div class="dc" id="dPct">0%</div>
+            </div>
+            <div class="legend">
+              <div class="legend-item"><div class="ldot" style="background:#22c55e"></div>Done</div>
+              <div class="legend-item"><div class="ldot" style="background:#eab308"></div>Pending</div>
+              <div class="legend-item"><div class="ldot" style="background:#3b82f6"></div>In Progress</div>
+              <div class="legend-item"><div class="ldot" style="background:#ef4444"></div>Blocked</div>
+            </div>
+          </div>
+        </div>
+        <div class="panel">
+          <div class="ph"><span class="pt">Priority Breakdown</span></div>
+          <div id="dPriority" style="padding:18px 20px"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ALL TASKS PAGE -->
+    <div class="vs" id="vs-tasks">
+      <div class="panel" style="margin-bottom:0">
+        <div class="ph" style="flex-wrap:wrap;gap:10px;padding:14px 18px;">
+          <div style="display:flex;align-items:center;gap:10px;flex:1;min-width:0;">
+            <span class="pt">All Tasks</span>
+            <span id="atCount" style="font-size:.75rem;color:var(--muted);background:#f0ede8;padding:2px 9px;border-radius:20px;font-weight:500;"></span>
+          </div>
+          <div style="display:flex;gap:7px;align-items:center;flex-wrap:wrap;">
+            <button class="btn btn-outline btn-sm" onclick="atClearFilters()">✕ Clear filters</button>
+          </div>
+        </div>
+
+        <!-- Bulk action bar (shown when rows are selected) -->
+        <div class="at-bulk-bar" id="atBulkBar">
+          <span class="at-bulk-count" id="atBulkCount">0 selected</span>
+          <div class="at-bulk-div"></div>
+          <select class="at-bulk-sel" id="atBkStatus" onchange="atBulkAction('status',this)">
+            <option value="">Set status…</option>
+            <option value="pending">Pending</option>
+            <option value="in_progress">In Progress</option>
+            <option value="review">Review</option>
+            <option value="done">Done</option>
+            <option value="blocked">Blocked</option>
+          </select>
+          <select class="at-bulk-sel" id="atBkPriority" onchange="atBulkAction('priority',this)">
+            <option value="">Set priority…</option>
+            <option value="low">Low</option>
+            <option value="medium">Medium</option>
+            <option value="high">High</option>
+            <option value="critical">Critical</option>
+          </select>
+          <select class="at-bulk-sel" id="atBkAssignee" onchange="atBulkAction('assigned_to',this)">
+            <option value="">Reassign…</option>
+          </select>
+          <button class="btn btn-danger btn-sm" onclick="atBulkDelete()">🗑 Delete selected</button>
+          <button class="btn btn-outline btn-sm" onclick="atClearSel()">✕ Deselect</button>
+        </div>
+
+        <!-- Filter bar -->
+        <div style="padding:10px 18px 12px;border-bottom:1px solid var(--border);display:flex;flex-wrap:wrap;gap:8px;background:#fafaf8;">
+          <input  id="atf_study"    type="text"  placeholder="Study ID…"           oninput="renderAT()"
+                  style="width:115px;padding:7px 10px;border:1.5px solid var(--border);border-radius:7px;font-size:.78rem;outline:none;font-family:'DM Sans',sans-serif;background:#fff;">
+          <input  id="atf_srrfc"   type="text"  placeholder="SR/RFC…"              oninput="renderAT()"
+                  style="width:105px;padding:7px 10px;border:1.5px solid var(--border);border-radius:7px;font-size:.78rem;outline:none;font-family:'DM Sans',sans-serif;background:#fff;">
+          <input  id="atf_task"    type="text"  placeholder="Task name…"           oninput="renderAT()"
+                  style="width:130px;padding:7px 10px;border:1.5px solid var(--border);border-radius:7px;font-size:.78rem;outline:none;font-family:'DM Sans',sans-serif;background:#fff;">
+          <select id="atf_process" onchange="renderAT()"
+                  style="padding:7px 10px;border:1.5px solid var(--border);border-radius:7px;font-size:.78rem;outline:none;font-family:'DM Sans',sans-serif;background:#fff;">
+            <option value="">All Mapping Processes</option>
+          </select>
+          <input  id="atf_assignee" type="text" placeholder="Assignee…"           oninput="renderAT()"
+                  style="width:110px;padding:7px 10px;border:1.5px solid var(--border);border-radius:7px;font-size:.78rem;outline:none;font-family:'DM Sans',sans-serif;background:#fff;">
+          <input  id="atf_entid"   type="text"  placeholder="Ent. ID…"             oninput="renderAT()"
+                  style="width:100px;padding:7px 10px;border:1.5px solid var(--border);border-radius:7px;font-size:.78rem;outline:none;font-family:'DM Sans',sans-serif;background:#fff;">
+          <select id="atf_status"  onchange="renderAT()"
+                  style="padding:7px 10px;border:1.5px solid var(--border);border-radius:7px;font-size:.78rem;outline:none;font-family:'DM Sans',sans-serif;background:#fff;">
+            <option value="">All Status</option>
+            <option value="pending">Pending</option>
+            <option value="in_progress">In Progress</option>
+            <option value="review">Review</option>
+            <option value="done">Done</option>
+            <option value="blocked">Blocked</option>
+          </select>
+          <select id="atf_priority" onchange="renderAT()"
+                  style="padding:7px 10px;border:1.5px solid var(--border);border-radius:7px;font-size:.78rem;outline:none;font-family:'DM Sans',sans-serif;background:#fff;">
+            <option value="">All Priority</option>
+            <option value="critical">Critical</option>
+            <option value="high">High</option>
+            <option value="medium">Medium</option>
+            <option value="low">Low</option>
+          </select>
+          <input  id="atf_due"     type="date"  onchange="renderAT()"
+                  title="Filter by Due Date"
+                  style="padding:7px 10px;border:1.5px solid var(--border);border-radius:7px;font-size:.78rem;outline:none;font-family:'DM Sans',sans-serif;background:#fff;">
+        </div>
+
+        <!-- Table -->
+        <div class="tbl-wrap">
+          <table>
+            <thead><tr>
+              <th style="width:32px;padding:9px 6px 7px 12px;background:#f9f8f5;border-bottom:1px solid var(--border);">
+                <input type="checkbox" id="atSelAll" onchange="atSelAllRows(this.checked)" style="cursor:pointer;" title="Select all">
+              </th>
+              <th onclick="atSort('study_id')"       style="cursor:pointer;user-select:none">Study ID <span id="ats_study_id"></span></th>
+              <th onclick="atSort('sr_rfc')"         style="cursor:pointer;user-select:none">SR/RFC <span id="ats_sr_rfc"></span></th>
+              <th onclick="atSort('process')"        style="cursor:pointer;user-select:none">Mapping Process <span id="ats_process"></span></th>
+              <th onclick="atSort('task_name')"      style="cursor:pointer;user-select:none">Task Name <span id="ats_task_name"></span></th>
+              <th onclick="atSort('assignee_name')"  style="cursor:pointer;user-select:none">Assignee <span id="ats_assignee_name"></span></th>
+              <th onclick="atSort('enterprise_id')"  style="cursor:pointer;user-select:none">Ent. ID <span id="ats_enterprise_id"></span></th>
+              <th onclick="atSort('turnaround_time')" style="cursor:pointer;user-select:none">TAT(min) <span id="ats_turnaround_time"></span></th>
+              <th onclick="atSort('volume')"         style="cursor:pointer;user-select:none">Vol <span id="ats_volume"></span></th>
+              <th onclick="atSort('due_date')"       style="cursor:pointer;user-select:none">Due Date <span id="ats_due_date"></span></th>
+              <th onclick="atSort('status')"         style="cursor:pointer;user-select:none">Status <span id="ats_status"></span></th>
+              <th onclick="atSort('priority')"       style="cursor:pointer;user-select:none">Priority <span id="ats_priority"></span></th>
+              <th style="text-align:center;width:90px">Actions</th>
+            </tr></thead>
+            <tbody id="atTbody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+
+    <!-- USERS -->
+    <div class="vs" id="vs-users">
+      <div class="panel" style="overflow:hidden;">
+        <div class="ph" style="justify-content:space-between;flex-wrap:wrap;gap:8px;">
+          <span class="pt">All Team Members</span>
+          <span id="uCount" style="font-size:.75rem;color:var(--muted);align-self:center;"></span>
+        </div>
+        <!-- activity column headers -->
+        <div class="u-divider" id="uActivityHeader" style="display:none;">
+          <span style="flex:1"></span>
+          <div class="u-activity" id="uDayLabels"></div>
+        </div>
+        <div class="users-scroll" id="usersPanel"></div>
+      </div>
+    </div>
+
+    <!-- ANALYTICS -->
+    <div class="vs" id="vs-analytics">
+      <div class="stats-grid" id="aStats"></div>
+      <div class="panels">
+        <div class="panel">
+          <div class="ph"><span class="pt">Tasks by Priority</span></div>
+          <div id="aPriority" style="padding:20px"></div>
+        </div>
+        <div class="panel">
+          <div class="ph" style="flex-wrap:wrap;gap:8px">
+            <span class="pt">Key Metrics</span>
+            <div style="display:flex;align-items:center;gap:6px;margin-left:auto">
+              <button class="btn btn-outline btn-sm" id="aCalPrev" onclick="shiftCalMonth(-1)">&#8249;</button>
+              <span id="aCalLabel" style="font-family:'Syne',sans-serif;font-weight:700;font-size:.85rem;min-width:110px;text-align:center">—</span>
+              <button class="btn btn-outline btn-sm" id="aCalNext" onclick="shiftCalMonth(1)">&#8250;</button>
+            </div>
+          </div>
+          <!-- Calendar grid -->
+          <div id="aCalGrid" style="padding:12px 16px 6px"></div>
+          <!-- Static metrics -->
+          <div id="aMetrics" style="padding:6px 20px 20px"></div>
+        </div>
+      </div>
+      <!-- TAT Overload Warnings -->
+      <div class="panel" id="aTatWarnPanel" style="margin-top:0;">
+        <div class="ph" id="aTatWarnPh">
+          <span class="pt" id="aTatWarnTitle">⏳ Loading TAT data…</span>
+          <span id="aTatWarnSub" style="font-size:.75rem;color:var(--muted)">Members exceeding 540 mins TAT per day (9 hrs total)</span>
+        </div>
+        <div id="aTatWarn" style="padding:16px 20px"></div>
+      </div>
+    </div>
+
+    <!-- TASK NAMES -->
+    <div class="vs" id="vs-tasknames">
+      <!-- ── Mapping Process Manager ── -->
+      <div class="panel" style="margin-bottom:16px">
+        <div class="ph" style="flex-wrap:wrap;gap:8px">
+          <span class="pt">⚙️ Mapping Process Manager</span>
+          <span id="pmCount" style="font-size:.75rem;color:var(--muted);align-self:center"></span>
+        </div>
+        <div id="pmChips" style="padding:12px 16px;display:flex;flex-wrap:wrap;gap:8px;min-height:52px;align-items:center">
+          <span style="color:var(--muted);font-size:.82rem">Loading…</span>
+        </div>
+        <div style="display:flex;gap:8px;padding:0 16px 14px;align-items:center">
+          <input type="text" id="pmNewName" placeholder="New mapping process name…" maxlength="200"
+                 style="flex:1;padding:7px 12px;border:1.5px solid var(--border);border-radius:8px;font-family:'DM Sans',sans-serif;font-size:.85rem;outline:none"
+                 onkeydown="if(event.key==='Enter')addProcess()">
+          <button class="btn btn-primary btn-sm" onclick="addProcess()">+ Add Mapping Process</button>
+        </div>
+      </div>
+
+      <div class="fbar">
+        <input type="text" id="tnSearch" placeholder="&#128269; Search task or mapping process…" oninput="renderTN()">
+        <select id="tnPF" onchange="renderTN()">
+          <option value="">All Mapping Processes</option>
+        </select>
+        <select id="tnSF" onchange="renderTN()">
+          <option value="">All Status</option>
+          <option value="active">Active</option>
+          <option value="inactive">Inactive</option>
+        </select>
+      </div>
+      <div class="panel">
+        <div class="ph">
+          <span class="pt">Task Names Master List</span>
+          <span id="tnCount" style="font-size:.78rem;color:var(--muted)"></span>
+        </div>
+        <div class="tbl-wrap">
+          <table>
+            <thead><tr><th>#</th><th>Mapping Process</th><th>Task Name</th><th>Cap Timing</th><th>Status</th><th>Created</th><th>Actions</th></tr></thead>
+            <tbody id="tnBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- EDIT PROCESS MODAL -->
+<div class="overlay" id="mEditProc">
+  <div class="modal" style="max-width:420px">
+    <div class="mh"><span class="mt">✏️ Rename Mapping Process</span><button class="mc" onclick="closeModal('mEditProc')">&#215;</button></div>
+    <div class="mb">
+      <input type="hidden" id="editProcId">
+      <div class="fg">
+        <label>Mapping Process Name *</label>
+        <input type="text" id="editProcName" placeholder="Mapping Process name…" maxlength="200"
+               onkeydown="if(event.key==='Enter')saveProcessRename()">
+        <div style="margin-top:6px;font-size:.73rem;color:var(--muted)">Renaming updates all task names that use this mapping process.</div>
+      </div>
+      <div class="ma">
+        <button class="btn btn-outline" onclick="closeModal('mEditProc')">Cancel</button>
+        <button class="btn btn-primary" onclick="saveProcessRename()">Save Rename</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- USER MODAL -->
+<div class="overlay" id="mUser">
+  <div class="modal">
+    <div class="mh"><span class="mt">Add New User</span><button class="mc" onclick="clearUserForm();closeModal('mUser')">&#215;</button></div>
+    <div class="mb">
+      <div class="fr">
+        <div class="fg"><label>Username *</label><input type="text" id="uName"></div>
+        <div class="fg"><label>Enterprise ID *</label><input type="text" id="uEid" placeholder="ENT-XXX-001"></div>
+      </div>
+      <div class="fg"><label>Email *</label><input type="email" id="uEmail"></div>
+      <div class="fr">
+        <div class="fg"><label>Password *</label><input type="password" id="uPass"></div>
+        <div class="fg"><label>Role</label>
+          <select id="uRole">
+            <option value="member">Member</option>
+            <option value="lead">Lead</option>
+            <option value="admin">Admin</option>
+          </select>
+        </div>
+      </div>
+      <div class="ma">
+        <button class="btn btn-outline" onclick="clearUserForm();closeModal('mUser')">Cancel</button>
+        <button class="btn btn-primary" onclick="saveUser()">Create User</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- EDIT USER MODAL -->
+<div class="overlay" id="mEditUser">
+  <div class="modal">
+    <div class="mh"><span class="mt">&#9998; Edit User</span><button class="mc" onclick="closeModal('mEditUser')">&#215;</button></div>
+    <div class="mb">
+      <input type="hidden" id="eUserId">
+      <div class="fg"><label>Username</label><input type="text" id="euName" disabled style="background:#f9f8f5;color:var(--muted)"></div>
+      <div class="fr">
+        <div class="fg"><label>Role</label>
+          <select id="euRole">
+            <option value="member">Member</option>
+            <option value="lead">Lead</option>
+            <option value="admin">Admin</option>
+          </select>
+        </div>
+        <div class="fg"><label>Status</label>
+          <select id="euActive">
+            <option value="true">Active</option>
+            <option value="false">Inactive</option>
+          </select>
+        </div>
+      </div>
+      <div class="fg"><label>Email</label><input type="email" id="euEmail"></div>
+      <div class="fg"><label>New Password <span style="font-size:.68rem;font-weight:400;text-transform:none;color:var(--muted)">(leave blank to keep current)</span></label>
+        <input type="password" id="euPass" placeholder="Min 8 chars, 1 uppercase, 1 number">
+      </div>
+      <div class="ma">
+        <button class="btn btn-outline" onclick="closeModal('mEditUser')">Cancel</button>
+        <button class="btn btn-primary" onclick="saveUserEdit()">Save Changes</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- TASK NAME MODAL -->
+<div class="overlay" id="mTN">
+  <div class="modal">
+    <div class="mh"><span class="mt" id="mTNTitle">Add Task Name</span><button class="mc" onclick="closeModal('mTN')">&#215;</button></div>
+    <div class="mb">
+      <input type="hidden" id="eTNId">
+      <div class="fg"><label>Mapping Process *</label>
+        <select id="tnProc">
+          <option value="">— Select Mapping Process —</option>
+        </select>
+      </div>
+      <div class="fg"><label>Task Name *</label><input type="text" id="tnName" placeholder="e.g. Data Validation"></div>
+      <div class="fr">
+        <div class="fg"><label>Cap Timing (mins) *</label><input type="number" id="tnCap" placeholder="45" min="1"></div>
+        <div class="fg"><label>Status</label>
+          <select id="tnStat"><option value="active">Active</option><option value="inactive">Inactive</option></select>
+        </div>
+      </div>
+      <div class="ma">
+        <button class="btn btn-outline" onclick="closeModal('mTN')">Cancel</button>
+        <button class="btn btn-primary" onclick="saveTN()">Save</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- IMPORT MODAL -->
+<div class="overlay" id="mImport">
+  <div class="modal modal-lg">
+    <div class="mh"><span class="mt">Import Task Names</span><button class="mc" onclick="closeModal('mImport');resetImp()">&#215;</button></div>
+    <div class="mb">
+      <div id="iStep1">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:13px">
+          <div style="font-size:.83rem;color:var(--muted)">Columns required: <strong>Mapping Process, Tasks, Cap Timings</strong></div>
+          <button class="btn btn-outline btn-sm" onclick="location.href='/api/task-names/template'">&#8595; Template</button>
+        </div>
+        <div class="imp-zone" id="iZone" onclick="document.getElementById('iFile').click()"
+             ondragover="event.preventDefault();this.classList.add('drag')"
+             ondragleave="this.classList.remove('drag')"
+             ondrop="iDrop(event)">
+          <div style="font-size:2rem;margin-bottom:8px">&#128194;</div>
+          <div style="font-weight:600;margin-bottom:4px">Click to browse or drag &amp; drop</div>
+          <div style="font-size:.78rem;color:var(--muted)">.xlsx files only</div>
+        </div>
+        <input type="file" id="iFile" accept=".xlsx" style="display:none" onchange="iHandle(this.files[0])">
+      </div>
+      <div id="iStep2" style="display:none">
+        <div class="imp-result" id="iResult"></div>
+        <div style="font-family:'Syne',sans-serif;font-weight:700;margin-bottom:9px" id="iLabel"></div>
+        <div class="prev-wrap">
+          <table><thead><tr><th>#</th><th>Mapping Process</th><th>Task Name</th><th>Cap (mins)</th><th>Valid?</th></tr></thead>
+          <tbody id="iPrev"></tbody></table>
+        </div>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px">
+          <button class="btn btn-outline btn-sm" onclick="resetImp()">&#8592; Back</button>
+          <div style="display:flex;gap:8px;align-items:center">
+            <span id="iVC" style="font-size:.8rem;color:var(--muted)"></span>
+            <button class="btn btn-success btn-sm" id="iCBtn" onclick="doImport()">&#10003; Import</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── NOTIFICATIONS VIEW ── -->
+    <div class="vs" id="vs-notifications">
+
+      <!-- Status + Overdue Summary -->
+      <div class="panels">
+        <div class="panel">
+          <div class="ph"><span class="pt">📬 Email Status</span>
+            <span id="mailStatusBadge" style="font-size:.75rem;padding:3px 10px;border-radius:20px;background:#f1f5f9;color:#475569">Loading…</span>
+          </div>
+          <div style="padding:14px 18px">
+            <div id="mailStatusBody" style="font-size:.83rem;color:var(--muted)">Loading configuration…</div>
+            <div style="margin-top:14px;display:flex;gap:8px;flex-wrap:wrap">
+              <button class="btn btn-outline btn-sm" onclick="testEmail()">📧 Send Test Email</button>
+              <button class="btn btn-outline btn-sm" onclick="loadNotifSettings()">↺ Refresh</button>
+            </div>
+          </div>
+        </div>
+        <div class="panel">
+          <div class="ph"><span class="pt">⚠️ Overdue Tasks</span>
+            <button class="btn btn-sm" style="background:#fee2e2;color:#991b1b;border:none;cursor:pointer" onclick="sendReminderNow()">📤 Send Reminder Now</button>
+          </div>
+          <div style="padding:14px 18px" id="overduePreviewBody">
+            <div style="font-size:.83rem;color:var(--muted)">Loading…</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Email Config Form -->
+      <div class="panel" style="margin-bottom:16px">
+        <div class="ph"><span class="pt">⚙️ SMTP Configuration</span>
+          <span style="font-size:.72rem;color:var(--muted)">Changes apply immediately — no restart needed</span>
+        </div>
+        <div style="padding:18px 22px">
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
+            <div class="fg" style="margin-bottom:0">
+              <label style="display:block;font-size:.7rem;font-weight:600;text-transform:uppercase;letter-spacing:.8px;margin-bottom:5px;color:var(--muted)">Mail Enabled</label>
+              <select id="cfgMailEnabled" style="width:100%;padding:9px 12px;border:1.5px solid var(--border);border-radius:8px;font-family:'DM Sans',sans-serif;font-size:.875rem;outline:none;color:var(--ink)">
+                <option value="true">✅ Enabled</option>
+                <option value="false">⛔ Disabled</option>
+              </select>
+            </div>
+            <div class="fg" style="margin-bottom:0">
+              <label style="display:block;font-size:.7rem;font-weight:600;text-transform:uppercase;letter-spacing:.8px;margin-bottom:5px;color:var(--muted)">Use TLS</label>
+              <select id="cfgMailTLS" style="width:100%;padding:9px 12px;border:1.5px solid var(--border);border-radius:8px;font-family:'DM Sans',sans-serif;font-size:.875rem;outline:none;color:var(--ink)">
+                <option value="true">Yes (recommended)</option>
+                <option value="false">No</option>
+              </select>
+            </div>
+            <div class="fg" style="margin-bottom:0">
+              <label style="display:block;font-size:.7rem;font-weight:600;text-transform:uppercase;letter-spacing:.8px;margin-bottom:5px;color:var(--muted)">SMTP Server</label>
+              <input id="cfgMailServer" type="text" placeholder="smtp.gmail.com" style="width:100%;padding:9px 12px;border:1.5px solid var(--border);border-radius:8px;font-family:'DM Sans',sans-serif;font-size:.875rem;outline:none;color:var(--ink)">
+            </div>
+            <div class="fg" style="margin-bottom:0">
+              <label style="display:block;font-size:.7rem;font-weight:600;text-transform:uppercase;letter-spacing:.8px;margin-bottom:5px;color:var(--muted)">Port</label>
+              <input id="cfgMailPort" type="number" placeholder="587" style="width:100%;padding:9px 12px;border:1.5px solid var(--border);border-radius:8px;font-family:'DM Sans',sans-serif;font-size:.875rem;outline:none;color:var(--ink)">
+            </div>
+            <div class="fg" style="margin-bottom:0">
+              <label style="display:block;font-size:.7rem;font-weight:600;text-transform:uppercase;letter-spacing:.8px;margin-bottom:5px;color:var(--muted)">Username / Email</label>
+              <input id="cfgMailUser" type="email" placeholder="yourname@gmail.com" style="width:100%;padding:9px 12px;border:1.5px solid var(--border);border-radius:8px;font-family:'DM Sans',sans-serif;font-size:.875rem;outline:none;color:var(--ink)">
+            </div>
+            <div class="fg" style="margin-bottom:0">
+              <label style="display:block;font-size:.7rem;font-weight:600;text-transform:uppercase;letter-spacing:.8px;margin-bottom:5px;color:var(--muted)">Password / App Password</label>
+              <input id="cfgMailPass" type="password" placeholder="Leave blank to keep current" style="width:100%;padding:9px 12px;border:1.5px solid var(--border);border-radius:8px;font-family:'DM Sans',sans-serif;font-size:.875rem;outline:none;color:var(--ink)">
+            </div>
+            <div class="fg" style="margin-bottom:0">
+              <label style="display:block;font-size:.7rem;font-weight:600;text-transform:uppercase;letter-spacing:.8px;margin-bottom:5px;color:var(--muted)">From Address</label>
+              <input id="cfgMailFrom" type="email" placeholder="HuddleTracker &lt;noreply@yourdomain.com&gt;" style="width:100%;padding:9px 12px;border:1.5px solid var(--border);border-radius:8px;font-family:'DM Sans',sans-serif;font-size:.875rem;outline:none;color:var(--ink)">
+            </div>
+            <div class="fg" style="margin-bottom:0">
+              <label style="display:block;font-size:.7rem;font-weight:600;text-transform:uppercase;letter-spacing:.8px;margin-bottom:5px;color:var(--muted)">Reminder Check Interval (secs)</label>
+              <input id="cfgReminderInterval" type="number" placeholder="3600" style="width:100%;padding:9px 12px;border:1.5px solid var(--border);border-radius:8px;font-family:'DM Sans',sans-serif;font-size:.875rem;outline:none;color:var(--ink)">
+            </div>
+          </div>
+          <div style="margin-top:16px;display:flex;gap:8px;justify-content:flex-end">
+            <button class="btn btn-outline" onclick="loadNotifSettings()">↺ Reset</button>
+            <button class="btn btn-primary" onclick="saveNotifSettings()">💾 Save Settings</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Overdue tasks table -->
+      <div class="panel">
+        <div class="ph"><span class="pt">📋 Current Overdue Tasks</span>
+          <span id="overdueCount" style="font-size:.75rem;color:var(--muted)"></span>
+        </div>
+        <div class="tbl-wrap">
+          <table>
+            <thead><tr style="background:#f9f8f5">
+              <th style="padding:9px 10px;font-size:.65rem;text-transform:uppercase;letter-spacing:.8px;color:var(--muted);border-bottom:1px solid var(--border)">Member</th>
+              <th style="padding:9px 10px;font-size:.65rem;text-transform:uppercase;letter-spacing:.8px;color:var(--muted);border-bottom:1px solid var(--border)">Study ID</th>
+              <th style="padding:9px 10px;font-size:.65rem;text-transform:uppercase;letter-spacing:.8px;color:var(--muted);border-bottom:1px solid var(--border)">Task Name</th>
+              <th style="padding:9px 10px;font-size:.65rem;text-transform:uppercase;letter-spacing:.8px;color:var(--muted);border-bottom:1px solid var(--border)">Priority</th>
+              <th style="padding:9px 10px;font-size:.65rem;text-transform:uppercase;letter-spacing:.8px;color:var(--muted);border-bottom:1px solid var(--border)">Status</th>
+              <th style="padding:9px 10px;font-size:.65rem;text-transform:uppercase;letter-spacing:.8px;color:var(--muted);border-bottom:1px solid var(--border)">Due Date</th>
+              <th style="padding:9px 10px;font-size:.65rem;text-transform:uppercase;letter-spacing:.8px;color:var(--muted);border-bottom:1px solid var(--border)">Days Overdue</th>
+            </tr></thead>
+            <tbody id="overdueTableBody">
+              <tr><td colspan="7" style="padding:20px;text-align:center;color:var(--muted)">Loading…</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+    </div><!-- /vs-notifications -->
+
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+<script>
+// =============================================================================
+// ADMIN PORTAL — CLIENT-SIDE JAVASCRIPT
+// =============================================================================
+//
+// Global state
+// ────────────
+//   allTasks   (array)  — in-memory cache of all task objects from GET /api/tasks
+//   allUsers   (array)  — in-memory cache of all user objects from GET /api/users
+//   allProjects(array)  — in-memory cache of all project objects
+//   allTN      (array)  — task-name lookup rows from GET /api/task-names
+//   impRows    (array)  — staging area for xlsx import parsed rows (before commit)
+//
+// Naming conventions
+// ──────────────────
+//   at*   — All Tasks view functions  (atLoad, renderAT, atEdit …)
+//   kn*   — Kanban view
+//   pr*   — Projects view
+//   usr*  — Users view
+//   tn*   — Task Names view
+//   proc* — Processes view
+//   an*   — Analytics view
+//   notif*— Notifications view
+//   db*   — Dashboard helpers
+//   sse*  — Server-Sent Events helpers
+//
+// Data flow
+// ─────────
+//  1. DOMContentLoaded → initCSRF() reads the token, initSSE() opens /api/stream,
+//     loadBootstrap() fires parallel fetches for tasks/users/projects/task-names.
+//  2. Each SSE event patches the relevant in-memory array and re-renders only
+//     the affected section (no full reload).
+//  3. All mutating fetches include { 'X-CSRF-Token': csrfToken } headers.
+//  4. escHtml() is called before any server-supplied string is injected into innerHTML.
+
+/* XSS-FIX: HTML-escape helper — always wrap untrusted data injected into innerHTML */
+function escHtml(s){if(s==null)return '';return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');}
+let allTN=[],impRows=[];
+
+/* ── Shared helpers ───────────────────────────────────────────────────────────
+   toast(msg, type)   — show a 3-second notification bar ('success' | 'error')
+   openModal(id)      — show an overlay modal and bind click-outside-to-close
+   closeModal(id)     — hide a modal overlay
+   bdg(value)         — render a coloured status/priority badge span
+   api(url, method, body) — CSRF-aware fetch wrapper; returns raw Response
+──────────────────────────────────────────────────────────────────────────── */
+function toast(m,t='success'){
+  const el=document.getElementById('toast');
+  el.textContent=(t==='success'?'✅ ':'❌ ')+m;
+  el.className='toast show';
+  setTimeout(()=>el.className='toast',3000);
+}
+function openModal(id){
+  const ov = document.getElementById(id);
+  ov.classList.add('open');
+  const box = ov.querySelector('.modal');
+  if(box && !box._spBound){
+    box.addEventListener('mousedown', e => e.stopPropagation());
+    box._spBound = true;
+  }
+}
+function closeModal(id){document.getElementById(id).classList.remove('open');}
+function bdg(v){if(!v)return '<span class="badge badge-unknown">—</span>';return `<span class="badge badge-${v}">${v.replace('_',' ')}</span>`;}
+async function api(u,m='GET',b=null){
+  const o={method:m,headers:{'Content-Type':'application/json','X-CSRF-Token':document.querySelector('meta[name="csrf-token"]')?.content||''}};
+  if(b)o.body=JSON.stringify(b);
+  return await fetch(u,o);
+}
+
+/* ── Navigation / view switching ─────────────────────────────────────────────
+   show(name) — hide all .vs sections, show the one matching id='vs-{name}',
+                update the active sidebar nav item and the top-bar title,
+                then lazy-load data for that section if it hasn't been loaded yet.
+──────────────────────────────────────────────────────────────────────────── */
+const TITLES={dashboard:'Dashboard',tasks:'All Tasks',users:'Users',analytics:'Analytics',tasknames:'Task Names',notifications:'🔔 Notifications'};
+function show(name){
+  try{
+    document.querySelectorAll('.vs').forEach(el=>el.classList.remove('active'));
+    document.querySelectorAll('.ni').forEach(el=>el.classList.remove('active'));
+    const vs=document.getElementById('vs-'+name);
+    if(!vs){console.error('Missing section: vs-'+name);return;}
+    vs.classList.add('active');
+    // BUG-FIX: use data-view attribute for reliable active highlighting
+    // instead of fragile text-content substring matching
+    const ni=document.querySelector(`.ni[data-view="${name}"]`);
+    if(ni) ni.classList.add('active');
+    const pgTitle=document.getElementById('pgTitle');
+    if(pgTitle) pgTitle.textContent=TITLES[name]||name;
+    ['bNewUser','bImpTN','bAddTN','bTaskExport'].forEach(id=>{const e=document.getElementById(id);if(e)e.style.display='none';});
+    if(name==='users'){const e=document.getElementById('bNewUser');if(e)e.style.display='';}
+    if(name==='tasknames'){
+      const i=document.getElementById('bImpTN');const a=document.getElementById('bAddTN');
+      if(i)i.style.display='';if(a)a.style.display='';
+    }
+    if(name==='tasks'){const e=document.getElementById('bTaskExport');if(e)e.style.display='';}
+    if(name==='dashboard')loadDash();
+    else if(name==='tasks')loadAllTasksPage();
+    else if(name==='users')loadUsers();
+    else if(name==='analytics')loadAnalytics();
+    else if(name==='tasknames'){loadProcesses();loadTN();}
+    else if(name==='notifications'){
+      try{loadNotifSettings();}catch(e){console.error('loadNotifSettings:',e);}
+      try{loadOverduePreview();}catch(e){console.error('loadOverduePreview:',e);}
+    }
+  }catch(e){console.error('show() error:',e);}
+}
+
+/* ── DASHBOARD ────────────────────────────────────────────────────────────────
+   loadDash() — fires parallel fetches for analytics summary, users activity,
+                and TAT warnings, then renders stat cards and the priority chart.
+   Inline SVG bar-charts are rendered without any charting library dependency.
+──────────────────────────────────────────────────────────────────────────── */
+async function loadDash(){
+  try{
+    const r = await api('/api/analytics');
+    console.log('[loadDash] status:', r.status, r.ok);
+    if(!r.ok){
+      const err = await r.json().catch(()=>({}));
+      console.error('[loadDash] API error:', err);
+      document.getElementById('dStats').innerHTML=`<p style="color:var(--red);padding:8px;grid-column:1/-1">⚠️ Failed to load stats (${r.status}): ${err.error||'unknown error'}</p>`;
+      return;
+    }
+    const d = await r.json();
+    console.log('[loadDash] data:', JSON.stringify(d));
+    const pdata = d.priority_data||{low:0,medium:0,high:0,critical:0};
+    document.getElementById('dStats').innerHTML=[
+      {l:'Total Tasks',v:d.total_tasks||0,c:'--accent'},
+      {l:'Completed',v:d.done_tasks||0,c:'--green'},
+      {l:'In Progress',v:d.in_progress||0,c:'--blue'},
+      {l:'Total Volume',v:d.total_volume||0,c:'--purple'},
+      {l:'Team Members',v:d.total_users||'—',c:'--gold'},
+      {l:'Avg TAT (mins)',v:d.avg_tat_mins||0,c:'--yellow'},
+      {l:'Completion %',v:(d.completion_rate||0)+'%',c:'--green'},
+      {l:'Blocked',v:d.blocked||0,c:'--red'},
+    ].map(s=>`<div class="stat-card" style="--c:var(${s.c})"><div class="stat-value">${s.v}</div><div class="stat-label">${s.l}</div></div>`).join('');
+    const C=251,tot=d.total_tasks||1;let off=0;
+    [{id:'cDone',v:d.done_tasks||0},{id:'cPend',v:d.pending_tasks||0},{id:'cInpro',v:d.in_progress||0}].forEach(s=>{
+      const el=document.getElementById(s.id);if(!el)return;
+      const len=(s.v/tot)*C;
+      el.setAttribute('stroke-dasharray',`${len} ${C-len}`);
+      el.setAttribute('stroke-dashoffset',-off);off+=len;
+    });
+    const dPct=document.getElementById('dPct');if(dPct)dPct.textContent=(d.completion_rate||0)+'%';
+    const pC={low:'#94a3b8',medium:'#eab308',high:'#f97316',critical:'#ef4444'};
+    const pM=Math.max(...Object.values(pdata),1);
+    const dPriority=document.getElementById('dPriority');
+    if(dPriority)dPriority.innerHTML=Object.entries(pdata).map(([k,v])=>
+      `<div style="margin-bottom:12px">
+         <div style="display:flex;justify-content:space-between;font-size:.78rem;margin-bottom:5px">
+           <span style="text-transform:capitalize;font-weight:500">${k}</span><span style="color:var(--muted)">${v}</span>
+         </div>
+         <div class="pb"><div class="pf" style="width:${(v/pM*100).toFixed(1)}%;background:${pC[k]}"></div></div>
+       </div>`).join('');
+  }catch(e){console.error('loadDash error:',e);document.getElementById('dStats').innerHTML='<p style="color:var(--muted);padding:8px">Error loading dashboard.</p>';}
+}
+
+
+
+/* ── ALL TASKS PAGE ───────────────────────────────────────────────────────────
+   Displays every task in a filterable, sortable table.
+
+   State:
+     atTasks    — full task list loaded from GET /api/tasks
+     atAllUsers — user list for filter dropdowns and inline assignment
+     atSortCol  — currently sorted column name ('' = default created_at desc)
+     atSortDir  — 1 = ascending, -1 = descending
+     atSelIds   — Set of task IDs currently checked for bulk action
+
+   Key functions:
+     loadAllTasksPage() — fetches tasks + users; seeds filter dropdowns
+     renderAT()        — applies all active filter inputs and re-renders the tbody
+     atSort(col)       — cycles sort direction; triggers renderAT()
+     atBulkAction()    — PATCH status/priority/assignee on all checked tasks
+     atBulkDelete()    — DELETE all checked tasks with confirmation
+     atInlineSave()    — inline status/priority dropdown change → immediate API PUT
+     atOpenEdit(id)    — open detail modal for a single task (tabbed: Info / History)
+     atSaveEdit()      — PUT updated task fields from the edit modal form
+     exportAllTasksPage() — trigger GET /api/tasks/export xlsx download
+──────────────────────────────────────────────────────────────────────────── */
+let atTasks = [];
+let atAllUsers = [];
+let atSortCol = '';
+let atSortDir = 1;
+
+async function loadAllTasksPage() {
+  const tbody = document.getElementById('atTbody');
+  if (tbody) tbody.innerHTML = '<tr><td colspan="12"><div class="empty"><div class="ei">⏳</div>Loading…</div></td></tr>';
+
+  try {
+    const [tasksRes, usersRes] = await Promise.all([api('/api/tasks'), api('/api/users')]);
+    const [tasks, users] = await Promise.all([tasksRes.json(), usersRes.json()]);
+    atTasks = tasks;
+    atAllUsers = users;
+
+    // Populate assignee dropdown in edit modal
+    const sel = document.getElementById('etAssignee');
+    if (sel) {
+      sel.innerHTML = '<option value="">— Select Assignee —</option>' +
+        users.map(u => `<option value="${u.id}">${escHtml(u.username)} (${escHtml(u.enterprise_id)})</option>`).join('');
+    }
+
+    // Populate process filter
+    const procs = [...new Set(tasks.map(t => t.process).filter(Boolean))].sort();
+    const pf = document.getElementById('atf_process');
+    if (pf) {
+      const cur = pf.value;
+      pf.innerHTML = '<option value="">All Mapping Processes</option>' +
+        procs.map(p => `<option value="${escHtml(p)}"${cur===p?' selected':''}>${escHtml(p)}</option>`).join('');
+    }
+
+    renderAT();
+  } catch (e) {
+    toast('Failed to load tasks', 'error');
+    console.error(e);
+  }
+}
+
+/* ── AT selection state ── */
+let atSelIds = new Set();
+
+function atUpdateBulkBar(){
+  const n = atSelIds.size;
+  const bar = document.getElementById('atBulkBar');
+  if(bar) bar.classList.toggle('on', n > 0);
+  const cnt = document.getElementById('atBulkCount');
+  if(cnt) cnt.textContent = `${n} task${n!==1?'s':''} selected`;
+}
+function atToggleRow(id, checked){
+  checked ? atSelIds.add(id) : atSelIds.delete(id);
+  atUpdateBulkBar();
+  const row = document.querySelector(`#atTbody tr[data-atid="${id}"]`);
+  if(row) row.classList.toggle('at-sel-row', checked);
+}
+function atSelAllRows(checked){
+  const rows = document.querySelectorAll('#atTbody .at-rcb');
+  rows.forEach(cb => {
+    const id = parseInt(cb.dataset.id);
+    checked ? atSelIds.add(id) : atSelIds.delete(id);
+    cb.checked = checked;
+  });
+  document.querySelectorAll('#atTbody tr[data-atid]').forEach(r => r.classList.toggle('at-sel-row', checked));
+  atUpdateBulkBar();
+}
+function atClearSel(){
+  atSelIds.clear();
+  document.querySelectorAll('#atTbody .at-rcb').forEach(cb => cb.checked = false);
+  document.querySelectorAll('#atTbody tr[data-atid]').forEach(r => r.classList.remove('at-sel-row'));
+  const bar = document.getElementById('atBulkBar'); if(bar) bar.classList.remove('on');
+  const cnt = document.getElementById('atBulkCount'); if(cnt) cnt.textContent = '0 selected';
+}
+
+async function atBulkAction(field, sel){
+  const v = sel.value; sel.value = '';
+  if(!v || !atSelIds.size) return;
+  const body = {ids:[...atSelIds], [field]: field==='assigned_to'?parseInt(v):v};
+  try{
+    const res = await api('/api/tasks/bulk','POST', body);
+    if(res.ok){
+      const d = await res.json();
+      toast(`Updated ${d.updated} task${d.updated!==1?'s':''}${d.skipped?` (${d.skipped} skipped)`:''}`, 'success');
+      atSelIds.clear();
+      await loadAllTasksPage();
+    } else { const d=await res.json(); toast(d.error||'Bulk update failed','error'); }
+  } catch{ toast('Network error','error'); }
+}
+
+async function atBulkDelete(){
+  const n = atSelIds.size; if(!n) return;
+  if(!confirm(`Delete ${n} task${n!==1?'s':''}? This cannot be undone.`)) return;
+  try{
+    const res = await api('/api/tasks/bulk-delete','POST',{ids:[...atSelIds]});
+    if(res.ok){
+      const d=await res.json();
+      toast(`Deleted ${d.deleted} task${d.deleted!==1?'s':''}`);
+      atSelIds.clear();
+      await loadAllTasksPage();
+    } else { const d=await res.json(); toast(d.error||'Delete failed','error'); }
+  } catch{ toast('Network error','error'); }
+}
+
+/* ── AT inline save ── */
+async function atInlineSave(id, field, value){
+  const task = atTasks.find(t=>t.id===id);
+  if(!task || task[field]===value) return;
+  const old = task[field];
+  task[field] = value; // optimistic
+  try{
+    const res = await api(`/api/tasks/${id}`,'PUT',{[field]:value});
+    if(res.ok){
+      const upd = await res.json();
+      const i = atTasks.findIndex(t=>t.id===id);
+      if(i>=0) atTasks[i] = upd;
+      renderAT();
+    } else {
+      task[field] = old;
+      const d = await res.json();
+      toast(d.error||'Update failed','error');
+      renderAT();
+    }
+  } catch{
+    task[field] = old;
+    toast('Network error','error');
+    renderAT();
+  }
+}
+
+function renderAT() {
+  const fStudy    = (document.getElementById('atf_study')?.value    || '').toLowerCase();
+  const fSrRfc    = (document.getElementById('atf_srrfc')?.value    || '').toLowerCase();
+  const fTask     = (document.getElementById('atf_task')?.value     || '').toLowerCase();
+  const fProcess  =  document.getElementById('atf_process')?.value  || '';
+  const fAssignee = (document.getElementById('atf_assignee')?.value || '').toLowerCase();
+  const fEntId    = (document.getElementById('atf_entid')?.value    || '').toLowerCase();
+  const fStatus   =  document.getElementById('atf_status')?.value   || '';
+  const fPriority =  document.getElementById('atf_priority')?.value || '';
+  const fDue      =  document.getElementById('atf_due')?.value      || '';
+
+  let rows = atTasks.filter(t =>
+    (!fStudy    || (t.study_id    ||'').toLowerCase().includes(fStudy))    &&
+    (!fSrRfc    || (t.sr_rfc      ||'').toLowerCase().includes(fSrRfc))    &&
+    (!fTask     || (t.task_name   ||'').toLowerCase().includes(fTask))     &&
+    (!fProcess  || t.process === fProcess)                                  &&
+    (!fAssignee || (t.assignee_name||'').toLowerCase().includes(fAssignee))&&
+    (!fEntId    || (t.enterprise_id||'').toLowerCase().includes(fEntId)) &&
+    (!fStatus   || t.status   === fStatus)   &&
+    (!fPriority || t.priority === fPriority) &&
+    (!fDue      || (t.due_date||'').startsWith(fDue))
+  );
+
+  if (atSortCol) {
+    rows.sort((a,b) => {
+      const av = a[atSortCol] || '', bv = b[atSortCol] || '';
+      return typeof av === 'number'
+        ? (av - bv) * atSortDir
+        : String(av).localeCompare(String(bv)) * atSortDir;
+    });
+  }
+
+  const countEl = document.getElementById('atCount');
+  if (countEl) countEl.textContent = `${rows.length} of ${atTasks.length} tasks`;
+
+  const tbody = document.getElementById('atTbody');
+  if (!tbody) return;
+  if (!rows.length) {
+    tbody.innerHTML = '<tr><td colspan="13"><div class="empty"><div class="ei">📋</div>No tasks match filters</div></td></tr>';
+    return;
+  }
+
+  const STATUSES  = ['pending','in_progress','review','done','blocked'];
+  const PRIORITIES = ['low','medium','high','critical'];
+
+  tbody.innerHTML = rows.map(t => {
+    const sel = atSelIds.has(t.id);
+    return `<tr class="${sel?'at-sel-row':''}" data-atid="${t.id}">
+    <td style="padding:9px 6px 9px 12px;">
+      <input type="checkbox" class="at-rcb" data-id="${t.id}" ${sel?'checked':''}
+             onchange="atToggleRow(${t.id},this.checked)" style="cursor:pointer;">
+    </td>
+    <td class="mono" style="font-size:.72rem">${escHtml(t.study_id)||'—'}</td>
+    <td style="font-size:.78rem">${escHtml(t.sr_rfc)||'—'}</td>
+    <td><span class="pchip" style="font-size:.68rem">${escHtml(t.process)||'—'}</span></td>
+    <td style="max-width:160px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:500"
+        title="${escHtml(t.task_name)}">${escHtml(t.task_name)}</td>
+    <td style="font-size:.8rem">${escHtml(t.assignee_name)||'—'}</td>
+    <td style="font-size:.75rem;color:var(--muted)">${escHtml(t.enterprise_id)||'—'}</td>
+    <td style="font-size:.8rem;text-align:center">${t.turnaround_time!=null?t.turnaround_time:'—'}</td>
+    <td style="font-size:.8rem;text-align:center">${t.volume!=null?t.volume:'—'}</td>
+    <td style="font-size:.75rem;color:var(--muted)">${escHtml(t.due_date)||'—'}</td>
+    <td>
+      <select class="il-sel" onchange="atInlineSave(${t.id},'status',this.value)" onclick="event.stopPropagation()">
+        ${STATUSES.map(s=>`<option value="${s}"${t.status===s?' selected':''}>${s.replace('_',' ')}</option>`).join('')}
+      </select>
+    </td>
+    <td>
+      <select class="il-sel" onchange="atInlineSave(${t.id},'priority',this.value)" onclick="event.stopPropagation()">
+        ${PRIORITIES.map(p=>`<option value="${p}"${t.priority===p?' selected':''}>${p}</option>`).join('')}
+      </select>
+    </td>
+    <td style="text-align:center;white-space:nowrap;">
+      <button class="btn btn-outline btn-sm" style="padding:4px 9px;font-size:.72rem;margin-right:3px;"
+              onclick="atOpenEdit(${t.id})" title="Edit task">✏️</button>
+      <button class="btn btn-danger btn-sm" style="padding:4px 9px;font-size:.72rem;"
+              data-delid="${t.id}" data-delname="${escHtml(t.task_name)}" data-delstudy="${escHtml(t.study_id||'')}"
+              onclick="atOpenDelete(this)" title="Delete task">🗑</button>
+    </td>
+  </tr>`;}).join('');
+
+  // Keep select-all checkbox in sync
+  const allCbs = tbody.querySelectorAll('.at-rcb');
+  const selAll = document.getElementById('atSelAll');
+  if(selAll) selAll.checked = allCbs.length>0 && [...allCbs].every(cb=>cb.checked);
+}
+
+function atSort(col) {
+  if (atSortCol === col) atSortDir *= -1;
+  else { atSortCol = col; atSortDir = 1; }
+  document.querySelectorAll('[id^="ats_"]').forEach(el => el.textContent = '');
+  const ind = document.getElementById('ats_' + col);
+  if (ind) ind.textContent = atSortDir === 1 ? ' ▲' : ' ▼';
+  renderAT();
+}
+
+function atClearFilters() {
+  ['atf_study','atf_srrfc','atf_task','atf_assignee','atf_entid','atf_due'].forEach(id => {
+    const el = document.getElementById(id); if (el) el.value = '';
+  });
+  ['atf_process','atf_status','atf_priority'].forEach(id => {
+    const el = document.getElementById(id); if (el) el.value = '';
+  });
+  atSortCol = ''; atSortDir = 1;
+  document.querySelectorAll('[id^="ats_"]').forEach(el => el.textContent = '');
+  renderAT();
+}
+
+function atOpenEdit(id) {
+  const t = atTasks.find(x => x.id === id);
+  if (!t) return;
+  document.getElementById('etId').value      = t.id;
+  document.getElementById('etStudyId').value = t.study_id || '';
+  document.getElementById('etSrRfc').value   = t.sr_rfc   || '';
+  document.getElementById('etProcess').value = t.process  || '';
+  document.getElementById('etTaskName').value= t.task_name|| '';
+  document.getElementById('etSubtask').value = t.subtask  || '';
+  document.getElementById('etTAT').value     = t.turnaround_time || '';
+  document.getElementById('etVol').value     = t.volume   || 1;
+  document.getElementById('etNotes').value   = t.notes    || '';
+  document.getElementById('etDue').value     = t.due_date ? t.due_date.substring(0,10) : '';
+  document.getElementById('etStarted').value = t.started_at ? t.started_at.substring(0,10) : '';
+
+  // Set status select
+  const statSel = document.getElementById('etStat');
+  if (statSel) [...statSel.options].forEach(o => o.selected = o.value === t.status);
+
+  // Set priority select
+  const priSel = document.getElementById('etPri');
+  if (priSel) [...priSel.options].forEach(o => o.selected = o.value === t.priority);
+
+  // Set assignee
+  const asgSel = document.getElementById('etAssignee');
+  if (asgSel) [...asgSel.options].forEach(o => o.selected = parseInt(o.value) === t.assigned_to);
+
+  openModal('mEditTask');
+}
+
+async function atSaveEdit() {
+  const id  = parseInt(document.getElementById('etId').value);
+  const tat = parseInt(document.getElementById('etTAT').value);
+  const vol = parseInt(document.getElementById('etVol').value);
+
+  if (!document.getElementById('etAssignee').value) { toast('Please select an assignee', 'error'); return; }
+  if (!tat || tat < 1)  { toast('Turnaround time must be at least 1 min', 'error'); return; }
+  if (!document.getElementById('etDue').value)       { toast('Due date is required', 'error'); return; }
+
+  const body = {
+    sr_rfc:          document.getElementById('etSrRfc').value.trim(),
+    subtask:         document.getElementById('etSubtask').value.trim(),
+    assigned_to:     parseInt(document.getElementById('etAssignee').value),
+    priority:        document.getElementById('etPri').value,
+    turnaround_time: tat,
+    volume:          vol || 1,
+    due_date:        document.getElementById('etDue').value,
+    started_at:      document.getElementById('etStarted').value || null,
+    status:          document.getElementById('etStat').value,
+    notes:           document.getElementById('etNotes').value.trim(),
+  };
+
+  try {
+    const res = await api(`/api/tasks/${id}`, 'PUT', body);
+    if (res.ok) {
+      toast('Task updated ✓');
+      closeModal('mEditTask');
+      await loadAllTasksPage();
+    } else {
+      const d = await res.json();
+      toast(d.error || 'Save failed', 'error');
+    }
+  } catch (e) {
+    toast('Network error', 'error');
+    console.error(e);
+  }
+}
+
+function atOpenDelete(btnOrId, desc) {
+  // Accept both atOpenDelete(btn) from data-attrs and atOpenDelete(id, desc) legacy
+  if (btnOrId && typeof btnOrId === 'object' && btnOrId.dataset) {
+    const btn = btnOrId;
+    document.getElementById('delTaskId').value       = btn.dataset.delid;
+    document.getElementById('delTaskDesc').textContent =
+      (btn.dataset.delname || '—') + (btn.dataset.delstudy ? ' — ' + btn.dataset.delstudy : '');
+  } else {
+    document.getElementById('delTaskId').value       = btnOrId;
+    document.getElementById('delTaskDesc').textContent = desc || '';
+  }
+  openModal('mDelTask');
+}
+
+async function atConfirmDelete() {
+  const id = parseInt(document.getElementById('delTaskId').value);
+  try {
+    const res = await api(`/api/tasks/${id}`, 'DELETE');
+    if (res.ok) {
+      toast('Task deleted');
+      closeModal('mDelTask');
+      await loadAllTasksPage();
+    } else {
+      const d = await res.json();
+      toast(d.error || 'Delete failed', 'error');
+    }
+  } catch (e) {
+    toast('Network error', 'error');
+    console.error(e);
+  }
+}
+
+function exportAllTasksPage() {
+  if (!atTasks.length) { toast('No tasks to export', 'error'); return; }
+  window.location.href = '/api/tasks/export';
+  toast('Exporting tasks…');
+}
+
+
+/* ── USERS ────────────────────────────────────────────────────────────────────
+   Manage user accounts (admin only).
+
+   loadUsers()     — fetch all users (including inactive) + render table
+   openNewUser()   — open the create-user modal with empty fields
+   saveUser()      — POST new user to /api/users
+   openEditUser()  — open the edit modal pre-populated with existing values
+   saveUserEdit()  — PUT role / is_active / password / email changes
+   clearUserForm() — reset the create form to empty defaults
+
+   Note: password is only included in the PUT payload when the admin types
+   something in the password field — an empty field leaves the existing hash.
+──────────────────────────────────────────────────────────────────────────── */
+async function loadUsers(){
+  const panel = document.getElementById('usersPanel');
+  const header = document.getElementById('uActivityHeader');
+  const dayLabels = document.getElementById('uDayLabels');
+  const uCount = document.getElementById('uCount');
+
+  panel.innerHTML = '<div style="padding:24px;text-align:center;color:var(--muted);font-size:.83rem;">Loading…</div>';
+
+  try {
+    // Fetch activity data (admin/lead only endpoint)
+    const resp = await api('/api/users/activity');
+    const data = await resp.json();
+
+    // If endpoint returned an error or non-array, fall back to /api/users
+    if (!resp.ok || !Array.isArray(data)) {
+      console.warn('Activity endpoint unavailable, falling back to /api/users:', data);
+      const r2 = await api('/api/users');
+      const users = await r2.json();
+      if (!Array.isArray(users) || !users.length) {
+        panel.innerHTML = '<div class="empty"><div>No users found</div></div>';
+        header.style.display = 'none';
+        return;
+      }
+      // Render without activity data
+      const cols = ['#ff4d2e','#22c55e','#3b82f6','#a855f7','#eab308','#f97316','#06b6d4','#ec4899'];
+      header.style.display = 'none';
+      uCount.textContent = `${users.length} member${users.length!==1?'s':''}`;
+      panel.innerHTML = users.map((u,i) => `<div class="urow" style="${u.is_active?'':'opacity:.5'}">
+        <div class="uav" style="background:${cols[i%cols.length]}">${escHtml(u.username[0].toUpperCase())}</div>
+        <div class="u-info">
+          <div class="u-name">${escHtml(u.username)}${u.is_active?'':' <span style="font-size:.68rem;color:var(--muted)">(inactive)</span>'}</div>
+          <div class="u-meta">${escHtml(u.enterprise_id)} &middot; ${escHtml(u.email)} &middot; <span style="text-transform:capitalize">${escHtml(u.role)}</span></div>
+        </div>
+        ${bdg(u.role)}
+        <button class="btn btn-outline btn-sm edit-user-btn" style="margin-left:6px;flex-shrink:0;"
+          data-uid="${u.id}" data-username="${escHtml(u.username)}"
+          data-role="${escHtml(u.role)}" data-active="${u.is_active}" data-email="${escHtml(u.email)}">&#9998; Edit</button>
+      </div>`).join('');
+      document.querySelectorAll('.edit-user-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+          openEditUser(btn.dataset.uid, btn.dataset.username, btn.dataset.role, btn.dataset.active==='true', btn.dataset.email);
+        });
+      });
+      return;
+    }
+
+    if (!data.length) {
+      panel.innerHTML = '<div class="empty"><div>No users found</div></div>';
+      header.style.display = 'none';
+      return;
+    }
+
+    // Build day column header labels from first user's activity
+    const days = data[0].activity;
+    const dayNames = ['Today', 'Yesterday', '2 Days Ago'];
+    dayLabels.innerHTML = days.map((d,i) => `
+      <div class="u-day">
+        <span class="u-day-lbl" style="${i===0?'color:var(--gold);font-weight:700;':''}">${dayNames[i]}</span>
+        <span style="font-size:.6rem;color:var(--muted)">${d.label}</span>
+      </div>`).join('');
+    header.style.display = 'flex';
+    uCount.textContent = `${data.length} member${data.length!==1?'s':''}`;
+
+    const cols = ['#ff4d2e','#22c55e','#3b82f6','#a855f7','#eab308','#f97316','#06b6d4','#ec4899'];
+
+    panel.innerHTML = data.map((u, i) => {
+      const activityHtml = u.activity.map((d, di) => {
+        const isToday = di === 0;
+        const cls = d.count > 0 ? (isToday ? 'today-has' : 'has-tasks') : 'no-tasks';
+        return `<div class="u-day"><span class="u-day-pill ${cls}" title="${d.count} task${d.count!==1?'s':''} submitted on ${d.label}">${d.count}</span></div>`;
+      }).join('');
+      return `<div class="urow" style="${u.is_active?'':'opacity:.5'}">
+        <div class="uav" style="background:${cols[i%cols.length]}">${escHtml(u.username[0].toUpperCase())}</div>
+        <div class="u-info">
+          <div class="u-name">${escHtml(u.username)}${u.is_active?'':' <span style="font-size:.68rem;color:var(--muted)">(inactive)</span>'}</div>
+          <div class="u-meta">${escHtml(u.enterprise_id)} &middot; ${escHtml(u.email)} &middot; <span style="text-transform:capitalize">${escHtml(u.role)}</span></div>
+        </div>
+        ${bdg(u.role)}
+        <div class="u-activity">${activityHtml}</div>
+        <button class="btn btn-outline btn-sm edit-user-btn" style="margin-left:6px;flex-shrink:0;"
+          data-uid="${u.id}" data-username="${escHtml(u.username)}"
+          data-role="${escHtml(u.role)}" data-active="${u.is_active}" data-email="${escHtml(u.email)}">&#9998; Edit</button>
+      </div>`;
+    }).join('');
+
+    document.querySelectorAll('.edit-user-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        openEditUser(btn.dataset.uid, btn.dataset.username, btn.dataset.role, btn.dataset.active==='true', btn.dataset.email);
+      });
+    });
+
+  } catch(e) {
+    console.error('loadUsers error:', e);
+    // Last-resort fallback: try plain /api/users
+    try {
+      const r2 = await api('/api/users');
+      const users = await r2.json();
+      if (Array.isArray(users) && users.length) {
+        header.style.display = 'none';
+        uCount.textContent = `${users.length} member${users.length!==1?'s':''}`;
+        const cols = ['#ff4d2e','#22c55e','#3b82f6','#a855f7','#eab308','#f97316','#06b6d4','#ec4899'];
+        panel.innerHTML = users.map((u,i) => `<div class="urow" style="${u.is_active?'':'opacity:.5'}">
+          <div class="uav" style="background:${cols[i%cols.length]}">${escHtml(u.username[0].toUpperCase())}</div>
+          <div class="u-info">
+            <div class="u-name">${escHtml(u.username)}</div>
+            <div class="u-meta">${escHtml(u.enterprise_id)} &middot; ${escHtml(u.email)}</div>
+          </div>
+          ${bdg(u.role)}
+          <button class="btn btn-outline btn-sm edit-user-btn" style="margin-left:6px;flex-shrink:0;"
+            data-uid="${u.id}" data-username="${escHtml(u.username)}"
+            data-role="${escHtml(u.role)}" data-active="${u.is_active}" data-email="${escHtml(u.email)}">&#9998; Edit</button>
+        </div>`).join('');
+        document.querySelectorAll('.edit-user-btn').forEach(btn => {
+          btn.addEventListener('click', () => {
+            openEditUser(btn.dataset.uid, btn.dataset.username, btn.dataset.role, btn.dataset.active==='true', btn.dataset.email);
+          });
+        });
+        return;
+      }
+    } catch(e2) { console.error('fallback also failed:', e2); }
+    panel.innerHTML = '<div class="empty"><div>Failed to load users</div></div>';
+    header.style.display = 'none';
+  }
+}
+function openEditUser(id, username, role, isActive, email){
+  document.getElementById('eUserId').value=id;
+  document.getElementById('euName').value=username;
+  document.getElementById('euRole').value=role;
+  document.getElementById('euActive').value=String(isActive);
+  document.getElementById('euEmail').value=email;
+  document.getElementById('euPass').value='';
+  openModal('mEditUser');
+}
+async function saveUserEdit(){
+  const id=document.getElementById('eUserId').value;
+  const body={role:document.getElementById('euRole').value,
+    is_active:document.getElementById('euActive').value==='true',
+    email:document.getElementById('euEmail').value.trim()};
+  const pw=document.getElementById('euPass').value;
+  if(pw)body.password=pw;
+  const r=await api(`/api/users/${id}`,'PUT',body);
+  if(r.ok){toast('User updated');closeModal('mEditUser');loadUsers();}
+  else{const d=await r.json();toast(d.error||'Failed','error');}
+}
+function clearUserForm(){
+  document.getElementById('uName').value='';
+  document.getElementById('uEid').value='';
+  document.getElementById('uEmail').value='';
+  document.getElementById('uPass').value='';
+  document.getElementById('uRole').value='member';
+}
+function openNewUser(){
+  clearUserForm();
+  openModal('mUser');
+}
+async function saveUser(){
+  const body={username:document.getElementById('uName').value.trim(),email:document.getElementById('uEmail').value.trim(),
+    enterprise_id:document.getElementById('uEid').value.trim(),password:document.getElementById('uPass').value,
+    role:document.getElementById('uRole').value};
+  if(!body.username||!body.email||!body.enterprise_id||!body.password){toast('All fields required','error');return;}
+  const r=await api('/api/users','POST',body);
+  if(r.ok){toast('User created');clearUserForm();closeModal('mUser');loadUsers();}
+  else{const d=await r.json();toast(d.error||'Failed','error');}
+}
+
+/* ── ANALYTICS ────────────────────────────────────────────────────────────────
+   Calendar heat-map + daily task drill-down.
+
+   State:
+     calYear, calMonth — currently displayed calendar month (UTC)
+     calDayData        — {YYYY-MM-DD: {created, started, due, done, blocked, total}}
+                         fetched from GET /api/analytics/daily?month=YYYY-MM
+     calSelected       — currently highlighted date string (YYYY-MM-DD)
+
+   Key functions:
+     loadAnalytics()       — initial load; defaults to current UTC month
+     loadCalMonth()        — fetches calDayData for calYear/calMonth; calls renderCalGrid()
+     renderCalGrid()       — builds the 7-column calendar HTML; applies heat-map colours
+     selectCalDay(dateStr) — fetches tasks for that date and renders the drill-down list
+     shiftCalMonth(delta)  — navigate ±1 month and reload
+──────────────────────────────────────────────────────────────────────────── */
+let calYear=0, calMonth=0, calDayData={}, calSelected='';
+
+async function loadAnalytics(){
+  try{
+    const now=new Date();
+    if(!calYear){calYear=now.getFullYear();calMonth=now.getMonth()+1;}
+    const r = await api('/api/analytics');
+    if(!r.ok){document.getElementById('aStats').innerHTML='<p style="color:var(--muted);padding:8px">Failed to load analytics.</p>';return;}
+    const d = await r.json();
+    const pdata = d.priority_data||{low:0,medium:0,high:0,critical:0};
+    document.getElementById('aStats').innerHTML=[
+      {l:'Completion Rate',v:(d.completion_rate||0)+'%',c:'--green'},
+      {l:'Avg TAT (mins)',v:d.avg_tat_mins||0,c:'--blue'},
+      {l:'Total Volume',v:d.total_volume||0,c:'--purple'},
+      {l:'Blocked Tasks',v:d.blocked||0,c:'--red'},
+    ].map(s=>`<div class="stat-card" style="--c:var(${s.c})"><div class="stat-value">${s.v}</div><div class="stat-label">${s.l}</div></div>`).join('');
+    const pC={low:'#94a3b8',medium:'#eab308',high:'#f97316',critical:'#ef4444'};
+    const pM=Math.max(...Object.values(pdata),1);
+    const aPriority=document.getElementById('aPriority');
+    if(aPriority)aPriority.innerHTML=Object.entries(pdata).map(([k,v])=>
+      `<div style="margin-bottom:13px">
+         <div style="display:flex;justify-content:space-between;font-size:.83rem;margin-bottom:5px">
+           <span style="font-weight:500;text-transform:capitalize">${k}</span><span style="color:var(--muted)">${v} tasks</span>
+         </div>
+         <div class="pb" style="height:8px"><div class="pf" style="width:${(v/pM*100).toFixed(1)}%;background:${pC[k]}"></div></div>
+       </div>`).join('');
+    const aMetrics=document.getElementById('aMetrics');
+    if(aMetrics)aMetrics.innerHTML=`<div style="display:grid;gap:0">
+      ${[['📋','Total Tasks',d.total_tasks||0],['✅','Done',d.done_tasks||0],['⏳','Pending',d.pending_tasks||0],
+         ['🔄','In Progress',d.in_progress||0],['🚫','Blocked',d.blocked||0],['📦','Total Volume',d.total_volume||0]]
+        .map(([i,l,v])=>`<div style="display:flex;align-items:center;justify-content:space-between;padding:9px 0;border-bottom:1px solid var(--border)">
+          <span style="font-size:.83rem">${i} ${l}</span><strong style="font-family:'Syne',sans-serif;font-size:.95rem">${v}</strong></div>`).join('')}</div>`;
+    await loadCalMonth();
+    // TAT Overload Warnings
+  try{
+    const wr=await api('/api/analytics/tat-warnings');
+    const wd=await wr.json();
+    const warns=wd.warnings||[];
+    const panel=document.getElementById('aTatWarnPanel');
+    const ph=document.getElementById('aTatWarnPh');
+    const title=document.getElementById('aTatWarnTitle');
+    const sub=document.getElementById('aTatWarnSub');
+    const cont=document.getElementById('aTatWarn');
+    if(!warns.length){
+      panel.style.border='1.5px solid #86efac';
+      ph.style.background='#f0fdf4';ph.style.borderBottomColor='#86efac';
+      title.style.color='#15803d';title.textContent='✅ No TAT Overloads';
+      sub.style.color='#15803d';sub.textContent='All members are within the 540 min daily limit';
+      cont.innerHTML='<div style="color:var(--muted);font-size:.85rem;padding:4px 0">No members exceeded 540 mins TAT on any single day.</div>';
+      return;
+    }
+    panel.style.border='1.5px solid #fca5a5';
+    ph.style.background='#fff5f5';ph.style.borderBottomColor='#fca5a5';
+    title.style.color='#b91c1c';title.textContent='⚠️ TAT Overload Warnings';
+    sub.style.color='#b91c1c';sub.textContent='Members exceeding 540 mins (9 hrs) TAT on a single day';
+    cont.innerHTML=warns.map(w=>{
+      const overBy=w.over_by_mins;
+      const pct=Math.min(100,Math.round((w.total_mins/540)*100));
+      const barCol=w.total_mins>720?'#ef4444':w.total_mins>600?'#f97316':'#eab308';
+      return `<div style="background:#fff8f8;border:1px solid #fecaca;border-radius:10px;padding:14px 16px;margin-bottom:12px;">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;flex-wrap:wrap;gap:6px">
+          <div style="display:flex;align-items:center;gap:10px">
+            <div style="width:34px;height:34px;border-radius:9px;background:#fecaca;display:flex;align-items:center;justify-content:center;font-family:'Syne',sans-serif;font-weight:700;font-size:.9rem;color:#b91c1c">${escHtml(w.member[0].toUpperCase())}</div>
+            <div>
+              <div style="font-weight:600;font-size:.92rem">${escHtml(w.member)}</div>
+              <div style="font-size:.74rem;color:var(--muted)">${escHtml(w.enterprise_id)}</div>
+            </div>
+          </div>
+          <div style="text-align:right">
+            <div style="font-family:'Syne',sans-serif;font-weight:800;font-size:1.05rem;color:#b91c1c">${w.total_mins} mins <span style="font-size:.75rem;font-weight:500">(${w.total_hrs} hrs)</span></div>
+            <div style="font-size:.72rem;color:#b91c1c;font-weight:500">+${overBy} mins over limit · ${escHtml(w.date)}</div>
+          </div>
+        </div>
+        <div style="background:#fee2e2;border-radius:6px;height:7px;margin-bottom:10px;overflow:hidden">
+          <div style="height:100%;width:${pct}%;background:${barCol};border-radius:6px;transition:width .4s"></div>
+        </div>
+        <div style="display:flex;flex-wrap:wrap;gap:6px">
+          ${w.tasks.map(t=>`<div style="background:#fff;border:1px solid #fecaca;border-radius:6px;padding:5px 10px;font-size:.75rem">
+            <span style="font-weight:600">${escHtml(t.task_name)}</span>
+            <span style="color:var(--muted);margin-left:5px">${escHtml(t.sr_rfc)}</span>
+            <span style="margin-left:6px;background:#fecaca;color:#b91c1c;padding:1px 7px;border-radius:4px;font-weight:600">${t.tat_mins} mins</span>
+          </div>`).join('')}
+        </div>
+      </div>`;
+    }).join('');
+  }catch(e){console.error('TAT warnings failed',e);}
+  }catch(e){console.error('loadAnalytics error:',e);document.getElementById('aStats').innerHTML='<p style="color:var(--muted);padding:8px">Error loading analytics.</p>';}
+}
+
+async function loadCalMonth(){
+  const pad=n=>String(n).padStart(2,'0');
+  const monthStr=`${calYear}-${pad(calMonth)}`;
+  document.getElementById('aCalLabel').textContent=
+    new Date(calYear,calMonth-1,1).toLocaleDateString('en-US',{month:'long',year:'numeric'});
+  const r=await api(`/api/analytics/daily?month=${monthStr}`);
+  const d=await r.json();
+  if(!r.ok){console.error('Calendar fetch failed',d);return;}
+  calDayData=d.days||{};
+  renderCalGrid(d.year,d.month,d.days_in_month,d.first_weekday);
+}
+
+function renderCalGrid(year,month,daysInMonth,firstWeekday){
+  const pad=n=>String(n).padStart(2,'0');
+  const today=new Date();
+  const todayStr=`${today.getFullYear()}-${pad(today.getMonth()+1)}-${pad(today.getDate())}`;
+  // firstWeekday: 0=Mon…6=Sun → convert to Sun-first grid offset
+  const offset=(firstWeekday+1)%7; // Sunday=0 in JS grid
+  let html='<div class="cal-grid">';
+  ['Su','Mo','Tu','We','Th','Fr','Sa'].forEach(h=>{
+    html+=`<div class="cal-hdr">${h}</div>`;
+  });
+  for(let i=0;i<offset;i++) html+='<div class="cal-day empty"></div>';
+  for(let d=1;d<=daysInMonth;d++){
+    const dateStr=`${year}-${pad(month)}-${pad(d)}`;
+    const info=calDayData[dateStr]||{};
+    const total=info.total||0;
+    const isToday=dateStr===todayStr;
+    const isSel=dateStr===calSelected;
+    const hasTasks=total>0;
+    let cls='cal-day';
+    if(isToday)cls+=' today';
+    if(isSel)cls+=' selected';
+    if(hasTasks&&!isSel)cls+=' has-tasks';
+    // dot colours: created=blue, started=green, due=yellow, blocked=red
+    let dots='';
+    if(info.created) dots+=`<div class="cal-dot" style="background:#3b82f6" title="${info.created} created"></div>`;
+    if(info.started) dots+=`<div class="cal-dot" style="background:#22c55e" title="${info.started} started"></div>`;
+    if(info.due)     dots+=`<div class="cal-dot" style="background:#eab308" title="${info.due} due"></div>`;
+    if(info.blocked) dots+=`<div class="cal-dot" style="background:#ef4444" title="${info.blocked} blocked"></div>`;
+    html+=`<div class="${cls}" data-date="${dateStr}" onclick="selectCalDay('${dateStr}')">
+      <div class="cal-dn">${d}</div>
+      ${hasTasks?`<div class="cal-dots">${dots}</div><div class="cal-count">${total}</div>`:''}
+    </div>`;
+  }
+  html+='</div>';
+  // Legend
+  html+=`<div style="display:flex;gap:12px;padding:8px 2px 4px;flex-wrap:wrap">
+    ${[['#3b82f6','Created'],['#22c55e','Started'],['#eab308','Due'],['#ef4444','Blocked']].map(([c,l])=>
+      `<div style="display:flex;align-items:center;gap:4px;font-size:.68rem;color:var(--muted)">
+        <div style="width:7px;height:7px;border-radius:50%;background:${c}"></div>${l}</div>`).join('')}
+  </div>`;
+  document.getElementById('aCalGrid').innerHTML=html;
+}
+
+async function selectCalDay(dateStr){
+  if(calSelected===dateStr){
+    // Toggle off
+    calSelected='';
+    renderCalGrid(calYear,calMonth,
+      new Date(calYear,calMonth,0).getDate(),
+      new Date(calYear,calMonth-1,1).getDay()===0?6:new Date(calYear,calMonth-1,1).getDay()-1);
+    document.getElementById('aCalDayDetail')?.remove();
+    return;
+  }
+  calSelected=dateStr;
+  // Re-render grid with new selection highlighted
+  const daysInMonth=new Date(calYear,calMonth,0).getDate();
+  const fw=new Date(calYear,calMonth-1,1).getDay();
+  const firstWeekday=fw===0?6:fw-1;
+  renderCalGrid(calYear,calMonth,daysInMonth,firstWeekday);
+  // Fetch tasks for this day
+  const r=await api(`/api/analytics/daily?date=${dateStr}`);
+  const d=await r.json();
+  renderDayDetail(dateStr,d.tasks||[]);
+}
+
+function renderDayDetail(dateStr,tasks){
+  const existing=document.getElementById('aCalDayDetail');
+  if(existing)existing.remove();
+  const date=new Date(dateStr+'T00:00:00');
+  const label=date.toLocaleDateString('en-US',{weekday:'long',month:'long',day:'numeric',year:'numeric'});
+  const statusColor={pending:'#eab308',in_progress:'#3b82f6',review:'#a855f7',done:'#22c55e',blocked:'#ef4444'};
+  let rows='';
+  if(!tasks.length){
+    rows='<div style="color:var(--muted);font-size:.82rem;padding:6px 0">No tasks created, started, or due on this day.</div>';
+  } else {
+    rows=tasks.map(t=>{
+      const flags=(t.day_flags||[]).map(f=>`<span class="day-flag ${f}">${f}</span>`).join(' ');
+      const sc=statusColor[t.status]||'#aaa';
+      return `<div class="day-task-row">
+        <div style="width:4px;border-radius:2px;background:${sc};flex-shrink:0;align-self:stretch;min-height:36px"></div>
+        <div style="flex:1;min-width:0">
+          <div style="font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escHtml(t.task_name||'—')}</div>
+          <div style="font-size:.73rem;color:var(--muted);margin-top:2px">
+            ${escHtml(t.study_id||'—')} · ${escHtml(t.sr_rfc||'—')} · ${escHtml(t.assignee_name||'Unassigned')}
+          </div>
+        </div>
+        <div style="display:flex;flex-direction:column;align-items:flex-end;gap:3px;flex-shrink:0">
+          ${flags}
+          ${bdg(t.status)}
+        </div>
+      </div>`;
+    }).join('');
+  }
+  const div=document.createElement('div');
+  div.id='aCalDayDetail';
+  div.className='day-detail';
+  div.style.cssText='margin:0 16px 14px;';
+  div.innerHTML=`
+    <div class="day-detail-hdr">
+      <span>📅 ${escHtml(label)}</span>
+      <span style="font-size:.75rem;color:var(--muted);font-weight:400">${tasks.length} task${tasks.length!==1?'s':''}</span>
+    </div>
+    <div>${rows}</div>`;
+  document.getElementById('aCalGrid').after(div);
+}
+
+async function shiftCalMonth(delta){
+  calMonth+=delta;
+  if(calMonth>12){calMonth=1;calYear++;}
+  if(calMonth<1){calMonth=12;calYear--;}
+  calSelected='';
+  document.getElementById('aCalDayDetail')?.remove();
+  await loadCalMonth();
+}
+
+/* ── PROCESS MANAGER ──────────────────────────────────────────────────────────
+   Master list of mapping process categories.
+   Processes are shown as chips/tags; selecting one filters the Task Names table.
+
+   allProcesses     — array of {id, name} from GET /api/processes
+   loadProcesses()  — fetch + render process chips + populate dropdowns
+   renderPMChips()  — build chip HTML for the process filter bar
+   filterByChip()   — filter task-names table to a selected process
+   addProcess()     — POST new process
+   openEditProc()   — open rename modal
+   saveProcessRename() — PUT updated name (cascades to TaskName + Task rows in API)
+   deleteProc()     — DELETE with confirmation; blocked by API if refs exist
+──────────────────────────────────────────────────────────────────────────── */
+let allProcesses=[];
+async function loadProcesses(){
+  const r=await api('/api/processes');
+  if(!r.ok)return;
+  const data=await r.json();
+  allProcesses=Array.isArray(data)?data:[];
+  renderPMChips();
+  populateProcDropdowns();
+}
+function renderPMChips(){
+  const c=document.getElementById('pmChips');
+  document.getElementById('pmCount').textContent=`${allProcesses.length} mapping process${allProcesses.length!==1?'es':''}`;
+  if(!allProcesses.length){c.innerHTML='<span style="color:var(--muted);font-size:.82rem">No mapping processes yet — add one below.</span>';return;}
+  const usage={};
+  allTN.forEach(d=>{usage[d.process]=(usage[d.process]||0)+1;});
+  const activeProc=document.getElementById('tnPF').value;
+  // "All" chip
+  const allActive=!activeProc?'active':'';
+  let html=`<div class="pm-chip ${allActive}" onclick="filterByChip('')" title="Show all">
+    <span class="cn">All</span>
+    <span class="cc">${allTN.length} task${allTN.length!==1?'s':''}</span>
+  </div>`;
+  html+=allProcesses.map(p=>{
+    const isActive=activeProc===p.name?'active':'';
+    return `
+    <div class="pm-chip ${isActive}" data-pname="${escHtml(p.name)}" title="Filter by ${escHtml(p.name)}">
+      <span class="cn">${escHtml(p.name)}</span>
+      <span class="cc">${usage[p.name]||0} task${(usage[p.name]||0)!==1?'s':''}</span>
+      <button class="cb ed" data-pid="${p.id}" data-pname="${escHtml(p.name)}" title="Rename">✏️</button>
+      <button class="cb dl" data-pid="${p.id}" data-pname="${escHtml(p.name)}" title="Delete">✕</button>
+    </div>`;
+  }).join('');
+  c.innerHTML=html;
+  // Attach click handlers after render — avoids apostrophe/backslash issues in inline onclick
+  c.querySelectorAll('.pm-chip[data-pname]').forEach(chip=>{
+    chip.addEventListener('click',e=>{
+      if(e.target.classList.contains('cb'))return; // let button handlers fire separately
+      filterByChip(chip.dataset.pname);
+    });
+  });
+  c.querySelectorAll('.cb.ed[data-pid]').forEach(btn=>{
+    btn.addEventListener('click',e=>{e.stopPropagation();openEditProc(btn.dataset.pid,btn.dataset.pname);});
+  });
+  c.querySelectorAll('.cb.dl[data-pid]').forEach(btn=>{
+    btn.addEventListener('click',e=>{e.stopPropagation();deleteProc(btn.dataset.pid,btn.dataset.pname);});
+  });
+}
+function filterByChip(procName){
+  document.getElementById('tnPF').value=procName;
+  document.getElementById('tnSearch').value='';
+  document.getElementById('tnSF').value='';
+  renderTN();
+  renderPMChips(); // refresh active state
+  // Only scroll when the Task Names section is actually visible
+  const tnSection=document.getElementById('vs-tasknames');
+  if(tnSection&&tnSection.classList.contains('active')){
+    document.getElementById('tnBody').closest('.panel').scrollIntoView({behavior:'smooth',block:'nearest'});
+  }
+}
+function populateProcDropdowns(){
+  const names=allProcesses.map(p=>p.name);
+  const pf=document.getElementById('tnPF');
+  const pfv=pf.value;
+  pf.innerHTML='<option value="">All Mapping Processes</option>'+names.map(n=>`<option${pfv===n?' selected':''}>${n}</option>`).join('');
+  const tp=document.getElementById('tnProc');
+  const tpv=tp.value;
+  tp.innerHTML='<option value="">— Select Mapping Process —</option>'+names.map(n=>`<option${tpv===n?' selected':''}>${n}</option>`).join('');
+}
+async function addProcess(){
+  const inp=document.getElementById('pmNewName');
+  const name=inp.value.trim();
+  if(!name){toast('Enter a mapping process name','error');return;}
+  const r=await api('/api/processes','POST',{name});
+  if(r.ok){inp.value='';toast(`Mapping Process "${name}" added`);await loadProcesses();}
+  else{const d=await r.json();toast(d.error||'Failed','error');}
+}
+function openEditProc(id,name){
+  document.getElementById('editProcId').value=id;
+  document.getElementById('editProcName').value=name;
+  openModal('mEditProc');
+  setTimeout(()=>document.getElementById('editProcName').focus(),100);
+}
+async function saveProcessRename(){
+  const id=document.getElementById('editProcId').value;
+  const name=document.getElementById('editProcName').value.trim();
+  if(!name){toast('Name cannot be empty','error');return;}
+  const r=await api(`/api/processes/${id}`,'PUT',{name});
+  if(r.ok){toast('Mapping Process renamed');closeModal('mEditProc');await loadProcesses();await loadTN();}
+  else{const d=await r.json();toast(d.error||'Rename failed','error');}
+}
+async function deleteProc(id,name){
+  const usage=allTN.filter(d=>d.process===name).length;
+  if(usage>0){toast(`Cannot delete "${name}" — ${usage} task name(s) use it. Reassign them first.`,'error');return;}
+  if(!confirm(`Delete mapping process "${name}"?`))return;
+  const r=await api(`/api/processes/${id}`,'DELETE');
+  if(r.ok){toast(`"${name}" deleted`);await loadProcesses();}
+  else{const d=await r.json();toast(d.error||'Delete failed','error');}
+}
+
+/* ── TASK NAMES ───────────────────────────────────────────────────────────────
+   Lookup table management for approved task name / cap-timing combinations.
+
+   allTN       — array of TaskName objects (global, shared with import)
+   loadTN()    — GET /api/task-names → allTN → renderTN() + renderPMChips()
+   renderTN()  — render the task-names table filtered by active process chip
+   openNewTN() — open the create modal
+   editTN(id)  — open the edit modal pre-populated
+   saveTN()    — POST (new) or PUT (edit) the task name record
+   delTN(id)   — DELETE with confirmation
+
+   IMPORT section (below):
+   iHandle(file)  — validate + upload xlsx to /api/task-names/parse-xlsx
+   iParseRows()   — map xlsx columns to {process, task_name, cap_timing} + validate
+   doImport()     — POST valid rows to /api/task-names/bulk
+   resetImp()     — clear impRows and hide the import preview panel
+──────────────────────────────────────────────────────────────────────────── */
+async function loadTN(){
+  const r=await api('/api/task-names');
+  if(!r.ok)return;
+  const data=await r.json();
+  allTN=Array.isArray(data)?data:[];
+  renderTN();
+  renderPMChips();
+}
+function renderTN(){
+  const s=document.getElementById('tnSearch').value.toLowerCase();
+  const p=document.getElementById('tnPF').value;
+  const st=document.getElementById('tnSF').value;
+  const f=allTN.filter(d=>(!s||d.task_name.toLowerCase().includes(s)||d.process.toLowerCase().includes(s))&&(!p||d.process===p)&&(!st||d.status===st));
+  document.getElementById('tnCount').textContent=`${f.length} of ${allTN.length}`;
+  const tbody=document.getElementById('tnBody');
+  if(!f.length){tbody.innerHTML='<tr><td colspan="7"><div class="empty"><div class="ei">🏷️</div>No task names found</div></td></tr>';return;}
+  tbody.innerHTML=f.map((d,i)=>{
+    const cls=d.cap_timing<=30?'ok':d.cap_timing<=60?'warn':'danger';
+    return `<tr>
+      <td style="color:var(--muted);font-size:.75rem">${i+1}</td>
+      <td><span class="pchip">${escHtml(d.process)}</span></td>
+      <td style="font-weight:500">${escHtml(d.task_name)}</td>
+      <td><span class="cap-pill ${cls}">&#9200; ${d.cap_timing} mins</span></td>
+      <td>${bdg(d.status)}</td>
+      <td style="font-size:.77rem;color:var(--muted)">${escHtml(d.created_at)||'—'}</td>
+      <td style="white-space:nowrap">
+        <button class="btn btn-outline btn-sm" onclick="editTN(${d.id})">✏️ Edit</button>
+        <button class="btn btn-danger btn-sm" onclick="delTN(${d.id})">🗑 Delete</button>
+      </td></tr>`;}).join('');
+}
+function openNewTN(){
+  document.getElementById('eTNId').value='';document.getElementById('mTNTitle').textContent='Add Task Name';
+  document.getElementById('tnProc').value='';document.getElementById('tnName').value='';
+  document.getElementById('tnCap').value='';document.getElementById('tnStat').value='active';
+  openModal('mTN');
+}
+function editTN(id){
+  const d=allTN.find(x=>x.id===id);if(!d)return;
+  document.getElementById('eTNId').value=id;document.getElementById('mTNTitle').textContent='Edit Task Name';
+  document.getElementById('tnProc').value=d.process;document.getElementById('tnName').value=d.task_name;
+  document.getElementById('tnCap').value=d.cap_timing;document.getElementById('tnStat').value=d.status;
+  openModal('mTN');
+}
+async function saveTN(){
+  const eid=document.getElementById('eTNId').value;
+  const body={process:document.getElementById('tnProc').value,task_name:document.getElementById('tnName').value.trim(),
+    cap_timing:parseInt(document.getElementById('tnCap').value),status:document.getElementById('tnStat').value};
+  if(!body.process||!body.task_name||!body.cap_timing){toast('All fields required','error');return;}
+  const r=await api(eid?`/api/task-names/${eid}`:'/api/task-names',eid?'PUT':'POST',body);
+  if(r.ok){toast(eid?'Updated':'Added');closeModal('mTN');loadTN();}
+  else{const d=await r.json();toast(d.error||'Failed','error');}
+}
+async function delTN(id){
+  if(!confirm('Delete this task name?'))return;
+  const r=await api(`/api/task-names/${id}`,'DELETE');
+  if(r.ok){toast('Deleted');loadTN();}else toast('Failed','error');
+}
+
+/* IMPORT */
+function iDrop(e){e.preventDefault();document.getElementById('iZone').classList.remove('drag');const f=e.dataTransfer.files[0];if(f)iHandle(f);}
+async function iHandle(file){
+  if(!file||!file.name.toLowerCase().endsWith('.xlsx')){toast('Upload a .xlsx file','error');return;}
+  const zone=document.getElementById('iZone');
+  if(zone)zone.innerHTML='<div style="font-size:2rem">⏳</div><div>Parsing file…</div>';
+  try{
+    const fd=new FormData();fd.append('file',file);
+    const r=await fetch('/api/task-names/parse-xlsx',{method:'POST',headers:{'X-CSRF-Token':document.querySelector('meta[name="csrf-token"]')?.content||''},body:fd});
+    const d=await r.json();
+    if(!r.ok){toast(d.error||'Failed to parse file','error');resetImp();return;}
+    iParseRows(d.rows);
+  }catch(err){toast('Upload error: '+err.message,'error');resetImp();}
+}
+function stripApex(s){return typeof s==='string'?s.replace(/^'+/,'').trim():s;}function nkey(obj,...keys){const lk=Object.keys(obj).reduce((a,k)=>{a[k.replace(/^'+/,'').toLowerCase().trim()]=k;return a;},{});for(const k of keys){const m=lk[k.toLowerCase()];if(m!==undefined)return stripApex(obj[m]);}return '';}
+function iParseRows(data){
+  // data comes pre-parsed from server
+  impRows=data;
+  const v=impRows.filter(r=>r.valid).length,iv=impRows.length-v;
+  document.getElementById('iStep1').style.display='none';
+  document.getElementById('iStep2').style.display='block';
+  document.getElementById('iLabel').textContent=`Preview: ${impRows.length} rows`;
+  document.getElementById('iVC').textContent=`${v} valid, ${iv} invalid`;
+  const res=document.getElementById('iResult');
+  if(iv===0){res.className='imp-result success';res.textContent=`All ${v} rows valid.`;}
+  else if(v===0){res.className='imp-result error';res.textContent='No valid rows found.';}
+  else{res.className='imp-result partial';res.textContent=`${v} valid rows will import, ${iv} skipped.`;}
+  res.style.display='block';
+  document.getElementById('iPrev').innerHTML=impRows.map(r=>`
+    <tr style="${r.valid?'':'background:#fff8f7'}">
+      <td style="color:var(--muted);font-size:.75rem">${r.idx}</td>
+      <td>${r.process||'<span style="color:var(--red)">—</span>'}</td>
+      <td>${r.task_name||'<span style="color:var(--red)">—</span>'}</td>
+      <td>${isNaN(r.cap_timing)?'<span style="color:var(--red)">—</span>':r.cap_timing+' mins'}</td>
+      <td>${r.valid?'<span style="color:var(--green);font-weight:600">✓</span>':`<span style="color:var(--red);font-size:.75rem">✗ ${r.errors.join(', ')}</span>`}</td>
+    </tr>`).join('');
+}
+async function doImport(){
+  const valid=impRows.filter(r=>r.valid);if(!valid.length){toast('No valid rows','error');return;}
+  const btn=document.getElementById('iCBtn');
+  btn.disabled=true;btn.textContent='Importing…';
+  const r=await api('/api/task-names/bulk','POST',{rows:valid});
+  if(r.ok){const d=await r.json();toast(`Imported ${d.imported} task names`);closeModal('mImport');resetImp();loadTN();}
+  else{const d=await r.json();toast(d.error||'Failed','error');btn.disabled=false;btn.textContent='✓ Import';}
+}
+function resetImp(){
+  document.getElementById('iStep1').style.display='block';
+  document.getElementById('iStep2').style.display='none';
+  document.getElementById('iFile').value='';
+  document.getElementById('iResult').style.display='none';
+  document.getElementById('iCBtn').textContent='✓ Import';
+  impRows=[];
+  const z=document.getElementById('iZone');
+  if(z)z.innerHTML='<div class="zone-icon">📂</div><div class="zone-title">Click or drag &amp; drop .xlsx</div>';
+}
+/* ── Bootstrap / global event listeners ──────────────────────────────────────
+   _mdTarget tracks the mousedown target so that click-outside-to-close modals
+   work correctly even when the user clicks and drags from inside the modal box
+   out to the overlay — without this check dragging would close the modal.
+──────────────────────────────────────────────────────────────────────────── */
+let _mdTarget = null;
+document.addEventListener('mousedown', e => { _mdTarget = e.target; });
+document.querySelectorAll('.overlay').forEach(ov => {
+  ov.addEventListener('click', e => {
+    if (e.target === ov && _mdTarget === ov) {
+      ov.classList.remove('open');
+      if (ov.id === 'mImport') resetImp();
+    }
+  });
+});
+
+/* ── Live clock (top-bar) ─────────────────────────────────────────────────────
+   Updates the HH:MM:SS AM/PM display and the full date label every second.
+   Uses a self-contained IIFE so no global tick variable is needed.
+──────────────────────────────────────────────────────────────────────────── */
+(function(){
+  function tick(){
+    const now=new Date();
+    const h=now.getHours(),m=now.getMinutes(),s=now.getSeconds();
+    const ampm=h>=12?'PM':'AM',h12=h%12||12;
+    const pad=n=>String(n).padStart(2,'0');
+    const days=['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+    const months=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    const te=document.getElementById('tcTime');
+    const de=document.getElementById('tcDate');
+    if(te)te.textContent=`${pad(h12)}:${pad(m)}:${pad(s)} ${ampm}`;
+    if(de)de.textContent=`${days[now.getDay()]}, ${months[now.getMonth()]} ${now.getDate()}, ${now.getFullYear()}`;
+  }
+  tick();setInterval(tick,1000);
+})();
+
+/* ── Server-Sent Events (real-time task sync) ─────────────────────────────────
+   Subscribes to GET /api/stream so all connected admin browsers stay in sync.
+
+   Events handled:
+     task_created — reloads the full task list (simpler than inserting a row)
+     task_updated — patches the matching entry in atTasks[] and re-renders the table
+     task_deleted — removes the task from atTasks[] and re-renders the table
+
+   Reconnect: on error the EventSource is closed and a 6-second timeout reconnects.
+   This tolerates brief network glitches and server restarts without page reload.
+──────────────────────────────────────────────────────────────────────────── */
+(function initAdminSSE(){
+  let es,retryT;
+  function connect(){
+    es=new EventSource('/api/stream');
+    es.addEventListener('task_created',()=>{if(document.querySelector('.sec[data-sec="tasks"].active')||window._atLoaded)loadAllTasksPage();});
+    es.addEventListener('task_updated',e=>{
+      const d=JSON.parse(e.data);
+      const i=atTasks.findIndex(t=>t.id===d.task.id);
+      if(i>=0){atTasks[i]=d.task;renderAT();}
+    });
+    es.addEventListener('task_deleted',e=>{
+      const d=JSON.parse(e.data);
+      atTasks=atTasks.filter(t=>t.id!==d.task_id);renderAT();
+    });
+    es.onerror=()=>{es.close();clearTimeout(retryT);retryT=setTimeout(connect,6000);};
+  }
+  connect();
+})();
+
+/* ── NOTIFICATIONS PANEL ──────────────────────────────────────────────────────
+   Manage and test the SMTP email configuration at runtime.
+
+   loadNotifSettings()   — GET /api/notifications/settings → populate form fields
+   saveNotifSettings()   — PUT updated config (password only sent if non-empty)
+   testEmail()           — POST /api/notifications/test → sends test to admin's email
+   sendReminderNow()     — POST /api/notifications/send-reminder → immediate blast
+   loadOverduePreview()  — GET /api/notifications/overdue-preview → show count + table
+──────────────────────────────────────────────────────────────────────────── */
+
+async function loadNotifSettings(){
+  const badge=document.getElementById('mailStatusBadge');
+  const body=document.getElementById('mailStatusBody');
+  try{
+    const r=await api('/api/notifications/settings');
+    if(!r.ok){
+      const err=await r.json().catch(()=>({}));
+      if(badge){badge.style.cssText='font-size:.75rem;padding:3px 10px;border-radius:20px;background:#fee2e2;color:#991b1b';badge.textContent='⚠️ Error';}
+      if(body)body.innerHTML=`<p style="color:var(--red);font-size:.83rem">${escHtml(err.error||`API error ${r.status}`)}</p>`;
+      return;
+    }
+    const d=await r.json();
+    const e=id=>document.getElementById(id);
+    e('cfgMailEnabled').value = String(d.mail_enabled);
+    e('cfgMailTLS').value     = String(d.mail_use_tls);
+    e('cfgMailServer').value  = d.mail_server||'';
+    e('cfgMailPort').value    = d.mail_port||587;
+    e('cfgMailUser').value    = d.mail_username||'';
+    e('cfgMailFrom').value    = d.mail_from||'';
+    e('cfgReminderInterval').value = d.reminder_interval||3600;
+    if(d.mail_enabled){
+      badge.style.cssText='font-size:.75rem;padding:3px 10px;border-radius:20px;background:#dcfce7;color:#14532d';
+      badge.textContent='✅ Enabled';
+      body.innerHTML=`<p style="margin:0 0 6px"><strong>Server:</strong> ${escHtml(d.mail_server)}:${d.mail_port}</p>
+        <p style="margin:0 0 6px"><strong>From:</strong> ${escHtml(d.mail_from||d.mail_username)}</p>
+        <p style="margin:0 0 6px"><strong>TLS:</strong> ${d.mail_use_tls?'Yes':'No'}</p>
+        <p style="margin:0;font-size:.78rem;color:var(--muted)">Emails are delivered asynchronously in a background thread.</p>`;
+    }else{
+      badge.style.cssText='font-size:.75rem;padding:3px 10px;border-radius:20px;background:#fee2e2;color:#991b1b';
+      badge.textContent='⛔ Disabled';
+      body.innerHTML=`<p style="margin:0 0 6px;color:#666">Email notifications are currently disabled.</p>
+        <p style="margin:0;font-size:.78rem;color:var(--muted)">Enable them below and fill in your SMTP credentials to start sending.</p>`;
+    }
+  }catch(e){
+    if(badge){badge.style.cssText='font-size:.75rem;padding:3px 10px;border-radius:20px;background:#fee2e2;color:#991b1b';badge.textContent='⚠️ Error';}
+    if(body)body.innerHTML='<p style="color:var(--muted);font-size:.83rem">Failed to load notification settings.</p>';
+    console.error('loadNotifSettings error:',e);
+  }
+}
+
+async function saveNotifSettings(){
+  const e=id=>document.getElementById(id);
+  const body={
+    mail_enabled: e('cfgMailEnabled').value==='true',
+    mail_server:  e('cfgMailServer').value.trim(),
+    mail_port:    parseInt(e('cfgMailPort').value)||587,
+    mail_use_tls: e('cfgMailTLS').value==='true',
+    mail_username:e('cfgMailUser').value.trim(),
+    mail_from:    e('cfgMailFrom').value.trim(),
+    reminder_interval: parseInt(e('cfgReminderInterval').value)||3600,
+  };
+  const pass=e('cfgMailPass').value;
+  if(pass)body.mail_password=pass;
+  try{
+    const r=await api('/api/notifications/settings','PUT',body);
+    if(r.ok){
+      toast('Settings saved ✓');
+      e('cfgMailPass').value='';
+      loadNotifSettings();
+    }else{const d=await r.json();toast(d.error||'Save failed','error');}
+  }catch{toast('Network error','error');}
+}
+
+async function testEmail(){
+  try{
+    const r=await api('/api/notifications/test','POST',{});
+    if(r.ok){const d=await r.json();toast(`Test email sent to ${d.sent_to} ✓`);}
+    else{const d=await r.json();toast(d.error||'Failed to send test email','error');}
+  }catch{toast('Network error','error');}
+}
+
+async function sendReminderNow(){
+  if(!confirm('Send overdue reminder emails to all admin/lead users now?'))return;
+  try{
+    const r=await api('/api/notifications/send-reminder','POST',{});
+    if(r.ok){toast('Overdue reminder sent ✓');loadOverduePreview();}
+    else{const d=await r.json();toast(d.error||'Failed','error');}
+  }catch{toast('Network error','error');}
+}
+
+async function loadOverduePreview(){
+  const previewBox=document.getElementById('overduePreviewBody');
+  const tbody=document.getElementById('overdueTableBody');
+  const countEl=document.getElementById('overdueCount');
+  try{
+    const r=await api('/api/notifications/overdue-preview');
+    if(!r.ok){
+      const err=await r.json().catch(()=>({}));
+      const msg=err.error||`Error ${r.status}`;
+      if(previewBox)previewBox.innerHTML=`<p style="color:var(--red);font-size:.83rem">⚠️ ${escHtml(msg)}</p>`;
+      if(tbody)tbody.innerHTML=`<tr><td colspan="7" style="padding:20px;text-align:center;color:var(--red)">${escHtml(msg)}</td></tr>`;
+      return;
+    }
+    const d=await r.json();
+    // Summary box
+    if(previewBox){
+      if(d.total===0){
+        previewBox.innerHTML='<p style="margin:0;color:#14532d;font-weight:600;font-size:.85rem">✅ No overdue tasks right now!</p>';
+      }else{
+        const rows=Object.entries(d.by_member).sort((a,b)=>b[1]-a[1])
+          .map(([m,c])=>`<div style="display:flex;justify-content:space-between;padding:4px 0;font-size:.82rem;border-bottom:1px solid var(--border)"><span>${escHtml(m)}</span><strong style="color:#c00">${c} task(s)</strong></div>`).join('');
+        previewBox.innerHTML=`<p style="margin:0 0 10px;font-size:.85rem;color:#991b1b;font-weight:600">⚠️ ${d.total} overdue task(s) across ${Object.keys(d.by_member).length} member(s)</p>${rows}`;
+      }
+    }
+    // Overdue count badge
+    if(countEl)countEl.textContent=d.total ? `${d.total} overdue` : 'All clear ✅';
+    // Full table — use pre-computed days_overdue from API, field name is 'assignee' not 'assignee_name'
+    if(!tbody)return;
+    const tasks=d.tasks||[];
+    if(!tasks.length){
+      tbody.innerHTML='<tr><td colspan="7" style="padding:24px;text-align:center;color:var(--muted)">✅ No overdue tasks</td></tr>';
+      return;
+    }
+    tbody.innerHTML=tasks.map(t=>{
+      const daysOver=t.days_overdue||0;
+      const daysStr=daysOver>0?`<strong style="color:#c00">${daysOver}d</strong>`:'<span style="color:var(--muted)">—</span>';
+      const pri=t.priority||'medium';
+      const sta=t.status||'pending';
+      return`<tr>
+        <td style="padding:9px 10px;border-bottom:1px solid var(--border)">${escHtml(t.assignee||'Unassigned')}</td>
+        <td style="padding:9px 10px;border-bottom:1px solid var(--border);font-family:monospace;font-size:.78rem">${escHtml(t.study_id||'—')}</td>
+        <td style="padding:9px 10px;border-bottom:1px solid var(--border);max-width:200px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${escHtml(t.task_name)}">${escHtml(t.task_name||'—')}</td>
+        <td style="padding:9px 10px;border-bottom:1px solid var(--border)"><span class="badge badge-${pri}">${pri}</span></td>
+        <td style="padding:9px 10px;border-bottom:1px solid var(--border)"><span class="badge badge-${sta}">${sta.replace('_',' ')}</span></td>
+        <td style="padding:9px 10px;border-bottom:1px solid var(--border);color:#c00;font-weight:600">${t.due_date||'—'}</td>
+        <td style="padding:9px 10px;border-bottom:1px solid var(--border)">${daysStr}</td>
+      </tr>`;
+    }).join('');
+  }catch(e){
+    console.error('loadOverduePreview error:',e);
+    if(previewBox)previewBox.innerHTML='<p style="color:var(--muted);font-size:.83rem">Failed to load overdue data.</p>';
+    if(tbody)tbody.innerHTML='<tr><td colspan="7" style="padding:20px;text-align:center;color:var(--muted)">Failed to load.</td></tr>';
+  }
+}
+
+(async()=>{try{await loadDash();}catch(e){console.error('init loadDash:',e);}})();
+</script>
+
+<!-- EDIT TASK MODAL (All Tasks page) -->
+<div class="overlay" id="mEditTask">
+  <div class="modal modal-lg">
+    <div class="mh">
+      <span class="mt">✏️ Edit Task</span>
+      <button class="mc" onclick="closeModal('mEditTask')">&#215;</button>
+    </div>
+    <div class="mb">
+      <input type="hidden" id="etId">
+      <div class="fr">
+        <div class="fg">
+          <label>Study ID</label>
+          <input type="text" id="etStudyId" readonly
+                 style="background:#f9f8f5;color:#888;cursor:not-allowed">
+        </div>
+        <div class="fg">
+          <label>SR / RFC</label>
+          <input type="text" id="etSrRfc" placeholder="e.g. RFC-2024-1001" maxlength="100">
+        </div>
+      </div>
+      <div class="fr">
+        <div class="fg">
+          <label>Mapping Process</label>
+          <input type="text" id="etProcess" readonly
+                 style="background:#f9f8f5;color:#888;cursor:not-allowed">
+        </div>
+        <div class="fg">
+          <label>Task Name</label>
+          <input type="text" id="etTaskName" readonly
+                 style="background:#f9f8f5;color:#888;cursor:not-allowed">
+        </div>
+      </div>
+      <div class="fg">
+        <label>Sub Task <span style="font-size:.67rem;font-weight:400;text-transform:none;color:var(--muted)">(letters &amp; numbers only)</span></label>
+        <input type="text" id="etSubtask" placeholder="Optional subtask detail…" maxlength="200"
+               oninput="this.value=this.value.replace(/[^a-zA-Z0-9 ]/g,'')"
+               onpaste="setTimeout(()=>this.value=this.value.replace(/[^a-zA-Z0-9 ]/g,''),0)">
+      </div>
+      <div class="fr">
+        <div class="fg">
+          <label>Assigned To *</label>
+          <select id="etAssignee"></select>
+        </div>
+        <div class="fg">
+          <label>Priority</label>
+          <select id="etPri">
+            <option value="low">Low</option>
+            <option value="medium">Medium</option>
+            <option value="high">High</option>
+            <option value="critical">Critical</option>
+          </select>
+        </div>
+      </div>
+      <div class="fr">
+        <div class="fg">
+          <label>Turnaround Time (mins) *</label>
+          <input type="number" id="etTAT" min="1" max="99999" placeholder="e.g. 60">
+        </div>
+        <div class="fg">
+          <label>Volume</label>
+          <input type="number" id="etVol" min="1" max="9999" value="1">
+        </div>
+      </div>
+      <div class="fr">
+        <div class="fg">
+          <label>Start Date</label>
+          <input type="date" id="etStarted">
+        </div>
+        <div class="fg">
+          <label>Due Date *</label>
+          <input type="date" id="etDue">
+        </div>
+      </div>
+      <div class="fg">
+        <label>Status</label>
+        <select id="etStat">
+          <option value="pending">Pending</option>
+          <option value="in_progress">In Progress</option>
+          <option value="review">Review</option>
+          <option value="done">Done</option>
+          <option value="blocked">Blocked</option>
+        </select>
+      </div>
+      <div class="fg">
+        <label>Notes</label>
+        <textarea id="etNotes" placeholder="Additional context…"></textarea>
+      </div>
+      <div class="ma">
+        <button class="btn btn-outline" onclick="closeModal('mEditTask')">Cancel</button>
+        <button class="btn btn-gold"    onclick="atSaveEdit()">Save Changes</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- DELETE CONFIRM MODAL (All Tasks page) -->
+<div class="overlay" id="mDelTask">
+  <div class="modal" style="max-width:420px;">
+    <div class="mh"><span class="mt" style="color:var(--red)">🗑 Delete Task</span><button class="mc" onclick="closeModal('mDelTask')">&#215;</button></div>
+    <div class="mb">
+      <p style="font-size:.9rem;color:#444;margin-bottom:18px;line-height:1.55;">
+        Are you sure you want to delete this task?<br>
+        <span id="delTaskDesc" style="font-weight:600;color:var(--ink)"></span><br>
+        <span style="font-size:.8rem;color:var(--muted)">This action cannot be undone.</span>
+      </p>
+      <input type="hidden" id="delTaskId">
+      <div class="ma">
+        <button class="btn btn-outline" onclick="closeModal('mDelTask')">Cancel</button>
+        <button class="btn btn-danger"  onclick="atConfirmDelete()">Yes, Delete</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+
+</body>
+</html>

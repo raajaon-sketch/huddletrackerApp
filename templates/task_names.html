@@ -1,0 +1,885 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="csrf-token" content="{{ csrf_token() }}">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Huddle Tracker – Task Names & Cap Timings</title>
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Sans:ital,wght@0,300;0,400;0,500;1,300&display=swap" rel="stylesheet">
+<style>
+:root {
+  --ink: #0a0a0f; --paper: #f5f3ee; --accent: #ff4d2e;
+  --green: #22c55e; --blue: #3b82f6; --purple: #a855f7;
+  --red: #ef4444; --yellow: #eab308; --gold: #c9a84c;
+  --card: #ffffff; --border: #e5e3dc; --muted: #888;
+  --sidebar-w: 240px;
+}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'DM Sans',sans-serif;background:var(--paper);color:var(--ink);min-height:100vh;display:flex;}
+
+/* ── Sidebar ── */
+.sidebar{width:var(--sidebar-w);background:var(--ink);color:white;display:flex;flex-direction:column;position:fixed;top:0;left:0;bottom:0;z-index:100;overflow-y:auto;}
+.sidebar-logo{padding:28px 24px 20px;font-family:'Syne',sans-serif;font-size:1.6rem;font-weight:800;letter-spacing:-1px;border-bottom:1px solid rgba(255,255,255,.08);}
+.sidebar-logo span{color:var(--accent);}
+.sidebar-user{padding:16px 24px;border-bottom:1px solid rgba(255,255,255,.08);margin-bottom:8px;}
+.sidebar-user .name{font-weight:500;font-size:.9rem;}
+.role-badge{display:inline-block;background:var(--accent);color:white;font-size:.65rem;padding:2px 8px;border-radius:20px;text-transform:uppercase;letter-spacing:1px;margin-top:4px;}
+.sidebar-nav{padding:8px 12px;flex:1;}
+.nav-label{font-size:.65rem;letter-spacing:2px;text-transform:uppercase;color:rgba(255,255,255,.3);padding:12px 12px 6px;}
+.nav-item{display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:8px;cursor:pointer;color:rgba(255,255,255,.6);font-size:.9rem;transition:all .15s;margin-bottom:2px;text-decoration:none;}
+.nav-item:hover,.nav-item.active{background:rgba(255,255,255,.08);color:white;}
+.nav-item.active{color:var(--accent);}
+.sidebar-footer{padding:16px 24px;border-top:1px solid rgba(255,255,255,.08);}
+.logout-btn{display:flex;align-items:center;gap:8px;color:rgba(255,255,255,.5);cursor:pointer;font-size:.85rem;transition:color .15s;}
+.logout-btn:hover{color:var(--accent);}
+
+/* ── Main ── */
+.main{margin-left:var(--sidebar-w);flex:1;display:flex;flex-direction:column;min-height:100vh;}
+.topbar{background:var(--card);border-bottom:1px solid var(--border);padding:16px 32px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:50;}
+.page-title{font-family:'Syne',sans-serif;font-size:1.3rem;font-weight:700;}
+.topbar-actions{display:flex;gap:10px;align-items:center;}
+.content{padding:28px 32px;}
+
+/* ── Buttons ── */
+.btn{padding:9px 18px;border-radius:8px;font-family:'DM Sans',sans-serif;font-size:.875rem;font-weight:500;cursor:pointer;border:none;transition:all .15s;display:inline-flex;align-items:center;gap:6px;white-space:nowrap;}
+.btn-primary{background:var(--ink);color:white;}.btn-primary:hover{background:var(--accent);}
+.btn-outline{background:transparent;border:1.5px solid var(--border);color:var(--ink);}.btn-outline:hover{border-color:var(--ink);}
+.btn-success{background:var(--green);color:white;}.btn-success:hover{opacity:.85;}
+.btn-danger{background:var(--red);color:white;}.btn-danger:hover{opacity:.85;}
+.btn-warning{background:var(--yellow);color:#333;}.btn-warning:hover{opacity:.85;}
+.btn-purple{background:var(--purple);color:white;}.btn-purple:hover{opacity:.85;}
+.btn-gold{background:var(--gold);color:var(--ink);font-weight:600;}.btn-gold:hover{opacity:.88;}
+.btn-sm{padding:5px 11px;font-size:.78rem;}
+.btn-xs{padding:3px 8px;font-size:.72rem;}
+
+/* ── Stats ── */
+.stats-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:16px;margin-bottom:24px;}
+.stat-card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:18px 20px;position:relative;overflow:hidden;}
+.stat-card::before{content:'';position:absolute;top:0;left:0;right:0;height:3px;background:var(--c,var(--accent));}
+.stat-value{font-family:'Syne',sans-serif;font-size:1.8rem;font-weight:800;line-height:1;margin-bottom:4px;}
+.stat-label{font-size:.75rem;color:var(--muted);text-transform:uppercase;letter-spacing:1px;}
+
+/* ── Mapping Process Manager Panel ── */
+.process-manager{background:var(--card);border:1px solid var(--border);border-radius:12px;margin-bottom:24px;overflow:hidden;}
+.pm-header{padding:16px 24px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;gap:12px;}
+.pm-title{font-family:'Syne',sans-serif;font-weight:700;font-size:.95rem;display:flex;align-items:center;gap:8px;}
+.pm-chips{padding:16px 20px;display:flex;flex-wrap:wrap;gap:10px;min-height:64px;align-items:center;}
+.pm-chip{display:inline-flex;align-items:center;gap:6px;background:#f5f3ee;border:1.5px solid var(--border);border-radius:8px;padding:6px 10px;font-size:.82rem;font-weight:500;transition:all .15s;cursor:pointer;}
+.pm-chip:hover{border-color:#888;}
+.pm-chip.active{background:var(--ink);color:#fff;border-color:var(--ink);}
+.pm-chip.active .chip-count{background:rgba(255,255,255,.18);color:rgba(255,255,255,.85);}
+.pm-chip.active .chip-btn.edit{color:rgba(255,255,255,.6);}.pm-chip.active .chip-btn.edit:hover{background:rgba(255,255,255,.15);color:#fff;}
+.pm-chip.active .chip-btn.del{color:rgba(255,255,255,.35);}.pm-chip.active .chip-btn.del:hover{background:rgba(239,68,68,.35);color:#fff;}
+.pm-chip .chip-name{max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.pm-chip .chip-count{font-size:.68rem;background:var(--border);border-radius:20px;padding:1px 6px;color:var(--muted);font-weight:400;}
+.pm-chip .chip-btn{border:none;background:none;cursor:pointer;padding:1px 3px;border-radius:4px;font-size:.8rem;line-height:1;transition:background .12s;}
+.pm-chip .chip-btn.edit{color:#666;}.pm-chip .chip-btn.edit:hover{background:#e8e6e0;color:var(--ink);}
+.pm-chip .chip-btn.del{color:#ccc;}.pm-chip .chip-btn.del:hover{background:#fee2e2;color:var(--red);}
+.pm-empty{color:var(--muted);font-size:.85rem;padding:4px 8px;}
+.pm-add-row{display:flex;gap:8px;align-items:center;padding:0 20px 16px;}
+.pm-add-row input{flex:1;padding:8px 12px;border:1.5px solid var(--border);border-radius:8px;font-family:'DM Sans',sans-serif;font-size:.875rem;outline:none;transition:border-color .15s;}
+.pm-add-row input:focus{border-color:var(--accent);}
+
+/* ── Filter bar ── */
+.filter-bar{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:20px;align-items:center;}
+.filter-bar input,.filter-bar select{padding:9px 14px;border:1.5px solid var(--border);border-radius:8px;font-family:'DM Sans',sans-serif;font-size:.875rem;background:var(--card);outline:none;transition:border-color .15s;}
+.filter-bar input:focus,.filter-bar select:focus{border-color:var(--ink);}
+.filter-bar input{flex:1;min-width:200px;}
+
+/* ── Panel & Table ── */
+.panel{background:var(--card);border:1px solid var(--border);border-radius:12px;overflow:hidden;margin-bottom:24px;}
+.panel-header{padding:18px 24px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;}
+.panel-title{font-family:'Syne',sans-serif;font-weight:700;font-size:1rem;}
+.tbl-wrap{overflow-x:auto;}
+table{width:100%;border-collapse:collapse;font-size:.875rem;}
+thead th{background:#f9f8f5;padding:11px 16px;text-align:left;font-size:.7rem;text-transform:uppercase;letter-spacing:1px;color:var(--muted);font-weight:500;border-bottom:1px solid var(--border);white-space:nowrap;}
+tbody td{padding:12px 16px;border-bottom:1px solid var(--border);vertical-align:middle;}
+tbody tr:last-child td{border-bottom:none;}
+tbody tr:hover{background:#fafaf8;}
+
+/* ── Badges ── */
+.badge{display:inline-block;padding:3px 10px;border-radius:20px;font-size:.72rem;font-weight:500;}
+.badge-active{background:#dcfce7;color:#14532d;}
+.badge-inactive{background:#f1f5f9;color:#475569;}
+.process-chip{display:inline-block;padding:3px 10px;border-radius:6px;font-size:.75rem;font-weight:600;background:var(--ink);color:white;}
+.cap-pill{display:inline-flex;align-items:center;gap:4px;background:#f0f9ff;color:#0369a1;border:1px solid #bae6fd;border-radius:20px;padding:3px 10px;font-size:.78rem;font-weight:500;}
+.cap-pill.warn{background:#fefce8;color:#854d0e;border-color:#fde68a;}
+.cap-pill.danger{background:#fee2e2;color:#991b1b;border-color:#fca5a5;}
+
+/* ── Modals ── */
+.overlay{position:fixed;inset:0;background:rgba(10,10,15,.6);backdrop-filter:blur(4px);z-index:200;display:none;align-items:center;justify-content:center;}
+.overlay.open{display:flex;}
+.modal{background:var(--card);border-radius:16px;width:520px;max-width:95vw;max-height:90vh;overflow-y:auto;box-shadow:0 20px 60px rgba(0,0,0,.3);}
+.modal-lg{width:760px;}
+.modal-header{padding:24px 28px 0;display:flex;align-items:center;justify-content:space-between;}
+.modal-title{font-family:'Syne',sans-serif;font-size:1.1rem;font-weight:700;}
+.modal-close{background:none;border:none;font-size:1.4rem;cursor:pointer;color:var(--muted);line-height:1;}
+.modal-body{padding:20px 28px 28px;}
+.form-row{display:grid;grid-template-columns:1fr 1fr;gap:14px;}
+.form-group{margin-bottom:16px;}
+.form-group label{display:block;font-size:.78rem;font-weight:500;text-transform:uppercase;letter-spacing:.8px;margin-bottom:6px;color:var(--ink);}
+.form-group input,.form-group select,.form-group textarea{width:100%;padding:10px 14px;border:1.5px solid var(--border);border-radius:8px;font-family:'DM Sans',sans-serif;font-size:.9rem;outline:none;transition:border-color .15s;}
+.form-group input:focus,.form-group select:focus{border-color:var(--accent);}
+.modal-actions{display:flex;gap:10px;justify-content:flex-end;margin-top:8px;}
+
+/* ── Import ── */
+.import-zone{border:2px dashed var(--border);border-radius:12px;padding:36px;text-align:center;transition:border-color .2s,background .2s;cursor:pointer;margin-bottom:16px;}
+.import-zone:hover,.import-zone.drag{border-color:var(--accent);background:#fff8f7;}
+.import-zone .zone-icon{font-size:2.5rem;margin-bottom:12px;}
+.import-zone .zone-title{font-family:'Syne',sans-serif;font-weight:700;font-size:1rem;margin-bottom:6px;}
+.import-zone .zone-sub{font-size:.85rem;color:var(--muted);}
+#fileInput{display:none;}
+.preview-wrap{max-height:240px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;margin-bottom:16px;}
+.import-result{padding:12px 16px;border-radius:8px;font-size:.875rem;margin-bottom:12px;display:none;}
+.import-result.success{background:#dcfce7;color:#14532d;border:1px solid #86efac;}
+.import-result.error{background:#fee2e2;color:#991b1b;border:1px solid #fca5a5;}
+.import-result.partial{background:#fef9c3;color:#854d0e;border:1px solid #fde68a;}
+.divider{display:flex;align-items:center;gap:12px;margin:14px 0;color:var(--muted);font-size:.8rem;}
+.divider::before,.divider::after{content:'';flex:1;height:1px;background:var(--border);}
+
+/* ── Toast ── */
+.toast{position:fixed;bottom:24px;right:24px;background:var(--ink);color:white;padding:12px 20px;border-radius:10px;font-size:.9rem;z-index:999;transform:translateY(80px);opacity:0;transition:all .3s;}
+.toast.show{transform:translateY(0);opacity:1;}
+.empty{text-align:center;padding:60px 20px;color:var(--muted);}
+.empty .empty-icon{font-size:3rem;margin-bottom:12px;opacity:.4;}
+
+/* ── Mapping Process Tabs ── */
+.tab-bar{display:flex;gap:0;border-bottom:2px solid var(--border);margin-bottom:20px;overflow-x:auto;flex-shrink:0;}
+.tab-bar::-webkit-scrollbar{height:4px;}
+.tab-item{display:flex;align-items:center;gap:6px;padding:10px 18px;cursor:pointer;color:var(--muted);font-size:.875rem;font-weight:500;white-space:nowrap;border-bottom:2px solid transparent;margin-bottom:-2px;transition:all .15s;user-select:none;flex-shrink:0;}
+.tab-item:hover{color:var(--ink);background:rgba(0,0,0,.03);}
+.tab-item.active{color:var(--accent);border-bottom-color:var(--accent);font-weight:600;}
+.tab-item .tab-count{font-size:.7rem;background:var(--border);border-radius:20px;padding:1px 7px;color:var(--muted);font-weight:400;transition:all .15s;}
+.tab-item.active .tab-count{background:var(--accent);color:#fff;}
+::-webkit-scrollbar{width:6px;height:6px;}::-webkit-scrollbar-track{background:transparent;}::-webkit-scrollbar-thumb{background:#d0cdc7;border-radius:3px;}
+</style>
+</head>
+<body>
+
+<!-- Sidebar -->
+<aside class="sidebar">
+  <div class="sidebar-logo">Huddle<span>.</span></div>
+  <div class="sidebar-user">
+    <div class="name">{{ user.username }}</div>
+    <span class="role-badge">{{ user.role }}</span>
+  </div>
+  <nav class="sidebar-nav">
+    <div class="nav-label">Management</div>
+    <a class="nav-item" href="/admin">📊 Dashboard</a>
+    <a class="nav-item" href="/admin">👥 Users</a>
+    <a class="nav-item" href="/admin">📈 Analytics</a>
+    <div class="nav-label">Configuration</div>
+    <a class="nav-item active" href="/task-names">🏷️ Task Names</a>
+  </nav>
+  <div class="sidebar-footer">
+    <a class="nav-item" href="/huddle" style="margin-bottom:8px">🔄 Switch to Huddle Portal</a>
+    <div class="logout-btn" onclick="location.href='/logout'">⬅ Sign out</div>
+  </div>
+</aside>
+
+<!-- Main -->
+<div class="main">
+  <div class="topbar">
+    <div class="page-title">🏷️ Task Names</div>
+    <div class="topbar-actions">
+      <button class="btn btn-outline" onclick="downloadTemplate()">⬇ Template</button>
+      <button class="btn btn-purple" onclick="openModal('importModal')">📤 Import</button>
+      <button class="btn btn-primary" onclick="openAddTaskName()">+ Task Name</button>
+    </div>
+  </div>
+
+  <div class="content">
+
+    <!-- Stats -->
+    <div class="stats-row">
+      <div class="stat-card" style="--c:var(--accent)">
+        <div class="stat-value" id="statTotal">0</div>
+        <div class="stat-label">Total Tasks</div>
+      </div>
+      <div class="stat-card" style="--c:var(--green)">
+        <div class="stat-value" id="statActive">0</div>
+        <div class="stat-label">Active</div>
+      </div>
+      <div class="stat-card" style="--c:var(--blue)">
+        <div class="stat-value" id="statProcesses">0</div>
+        <div class="stat-label">Mapping Processes</div>
+      </div>
+      <div class="stat-card" style="--c:var(--yellow)">
+        <div class="stat-value" id="statAvgCap">0</div>
+        <div class="stat-label">Avg Cap (mins)</div>
+      </div>
+    </div>
+
+    <!-- ── PROCESS TABS ── -->
+    <!-- Tab bar: one tab per process + "All" tab -->
+    <div class="tab-bar" id="processTabs">
+      <div class="tab-item active" data-proc="" onclick="switchTab(this, '')">
+        All <span class="tab-count" id="tabCount-all">0</span>
+      </div>
+      <!-- Dynamic process tabs injected here by JS -->
+    </div>
+
+    <!-- ── PROCESS MANAGER (collapsible) ── -->
+    <div class="process-manager" id="processManager">
+      <div class="pm-header" onclick="toggleProcessManager()" style="cursor:pointer;">
+        <div class="pm-title">⚙️ Mapping Process Manager
+          <span style="font-size:.72rem;font-weight:400;color:var(--muted);text-transform:none;letter-spacing:0">
+            — Add, rename or delete mapping processes · click to expand
+          </span>
+        </div>
+        <div style="display:flex;align-items:center;gap:12px;">
+          <span id="pmCount" style="font-size:.78rem;color:var(--muted)"></span>
+          <span id="pmToggleIcon" style="font-size:.85rem;color:var(--muted);transition:transform .2s">▼</span>
+        </div>
+      </div>
+      <div id="pmBody" style="display:none;">
+        <div class="pm-chips" id="pmChips">
+          <span class="pm-empty">Loading processes…</span>
+        </div>
+        <div class="pm-add-row">
+          <input type="text" id="pmNewName" placeholder="New mapping process name…" maxlength="200"
+                 onkeydown="if(event.key==='Enter')addProcess()">
+          <button class="btn btn-gold btn-sm" onclick="addProcess()">+ Add Mapping Process</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Filter bar (search + status, process filter now driven by tabs) -->
+    <div class="filter-bar">
+      <input type="text" id="searchInput" placeholder="🔍  Search task name…" oninput="renderTable()">
+      <!-- hidden process filter kept in sync with active tab -->
+      <select id="filterProcess" style="display:none" onchange="renderTable()">
+        <option value="">All Mapping Processes</option>
+      </select>
+      <select id="filterStatus" onchange="renderTable()">
+        <option value="">All Status</option>
+        <option value="active">Active</option>
+        <option value="inactive">Inactive</option>
+      </select>
+    </div>
+
+    <!-- Task Names Table -->
+    <div class="panel">
+      <div class="panel-header">
+        <span class="panel-title" id="tableTitle">Task Names — All Processes</span>
+        <div style="display:flex;gap:8px;align-items:center">
+          <span id="countLabel" style="font-size:.8rem;color:var(--muted)"></span>
+          <button class="btn btn-outline btn-sm" onclick="exportVisible()">⬇ Export</button>
+        </div>
+      </div>
+      <div class="tbl-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>#</th><th>Mapping Process</th><th>Task Name</th>
+              <th>Cap Timing</th><th>Status</th><th>Created</th><th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="taskNamesTbody"></tbody>
+        </table>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+
+<!-- ── ADD / EDIT TASK NAME MODAL ── -->
+<div class="overlay" id="addModal">
+  <div class="modal">
+    <div class="modal-header">
+      <span class="modal-title" id="addModalTitle">Add Task Name</span>
+      <button class="modal-close" onclick="closeModal('addModal')">×</button>
+    </div>
+    <div class="modal-body">
+      <input type="hidden" id="editId">
+      <div class="form-group">
+        <label>Mapping Process *</label>
+        <select id="fieldProcess">
+          <option value="">— Select Mapping Process —</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Task Name *</label>
+        <input type="text" id="fieldTaskName" placeholder="e.g. Data Validation">
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label>Cap Timing (mins) *</label>
+          <input type="number" id="fieldCapTiming" placeholder="e.g. 45" min="1" max="9999">
+        </div>
+        <div class="form-group">
+          <label>Status</label>
+          <select id="fieldStatus">
+            <option value="active">Active</option>
+            <option value="inactive">Inactive</option>
+          </select>
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button class="btn btn-outline" onclick="closeModal('addModal')">Cancel</button>
+        <button class="btn btn-primary" onclick="saveTaskName()">Save</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+
+<!-- ── EDIT PROCESS MODAL ── -->
+<div class="overlay" id="editProcessModal">
+  <div class="modal" style="width:420px">
+    <div class="modal-header">
+      <span class="modal-title">✏️ Rename Mapping Process</span>
+      <button class="modal-close" onclick="closeModal('editProcessModal')">×</button>
+    </div>
+    <div class="modal-body">
+      <input type="hidden" id="editProcessId">
+      <div class="form-group">
+        <label>Mapping Process Name *</label>
+        <input type="text" id="editProcessName" placeholder="Mapping Process name…" maxlength="200"
+               onkeydown="if(event.key==='Enter')saveProcess()">
+        <div style="margin-top:6px;font-size:.75rem;color:var(--muted)">
+          Renaming will update all task names that use this mapping process.
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button class="btn btn-outline" onclick="closeModal('editProcessModal')">Cancel</button>
+        <button class="btn btn-primary" onclick="saveProcess()">Save Rename</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+
+<!-- ── IMPORT MODAL ── -->
+<div class="overlay" id="importModal">
+  <div class="modal modal-lg">
+    <div class="modal-header">
+      <span class="modal-title">📤 Import from Excel</span>
+      <button class="modal-close" onclick="closeModal('importModal');resetImport()">×</button>
+    </div>
+    <div class="modal-body">
+      <div id="importStep1">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+          <div style="font-size:.88rem;color:var(--muted)">Upload .xlsx with columns: <strong>Mapping Process, Tasks, Cap Timings</strong></div>
+          <button class="btn btn-outline btn-sm" onclick="downloadTemplate()">⬇ Template</button>
+        </div>
+        <div class="import-zone" id="importZone" onclick="document.getElementById('fileInput').click()"
+             ondragover="event.preventDefault();this.classList.add('drag')"
+             ondragleave="this.classList.remove('drag')"
+             ondrop="handleDrop(event)">
+          <div class="zone-icon">📂</div>
+          <div class="zone-title">Click to browse or drag &amp; drop</div>
+          <div class="zone-sub">Supports .xlsx files only</div>
+        </div>
+        <input type="file" id="fileInput" accept=".xlsx,.XLSX" style="display:none" onchange="handleFile(this.files[0])">
+        <div class="divider">or paste data manually</div>
+        <div style="font-size:.8rem;color:var(--muted);margin-bottom:8px">Paste rows (Mapping Process | Tasks | Cap Timings), one per line, tab or comma separated:</div>
+        <textarea id="pasteArea" style="width:100%;height:90px;padding:10px;border:1.5px solid var(--border);border-radius:8px;font-family:monospace;font-size:.8rem;outline:none;resize:vertical"
+          placeholder="Data Processing&#9;Data Validation&#9;45&#10;Report Generation&#9;Monthly Report&#9;60"></textarea>
+        <div style="text-align:right;margin-top:8px">
+          <button class="btn btn-outline btn-sm" onclick="parsePaste()">Parse →</button>
+        </div>
+      </div>
+      <div id="importStep2" style="display:none">
+        <div class="import-result" id="importResult"></div>
+        <div style="font-family:'Syne',sans-serif;font-weight:700;margin-bottom:12px" id="previewLabel"></div>
+        <div class="preview-wrap">
+          <table>
+            <thead><tr><th>#</th><th>Mapping Process</th><th>Task Name</th><th>Cap Timing</th><th>Valid?</th></tr></thead>
+            <tbody id="previewTbody"></tbody>
+          </table>
+        </div>
+        <div style="display:flex;gap:10px;justify-content:space-between;align-items:center;margin-top:4px">
+          <button class="btn btn-outline btn-sm" onclick="resetImport()">← Back</button>
+          <div style="display:flex;gap:8px">
+            <span id="validCount" style="font-size:.85rem;color:var(--muted);align-self:center"></span>
+            <button class="btn btn-success" id="confirmImportBtn" onclick="confirmImport()">✅ Import Valid Rows</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+let allData      = [];   // task names from server
+let allProcesses = [];   // process list from server
+let importRows   = [];
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+function toast(msg, type='success') {
+  const t = document.getElementById('toast');
+  t.textContent = (type==='success' ? '✅ ' : '❌ ') + msg;
+  t.className = 'toast show';
+  setTimeout(() => t.className = 'toast', 3200);
+}
+function openModal(id) {
+  const ov = document.getElementById(id);
+  ov.classList.add('open');
+  const box = ov.querySelector('.modal');
+  if(box && !box._spBound){
+    box.addEventListener('mousedown', e => e.stopPropagation());
+    box._spBound = true;
+  }
+}
+function closeModal(id) { document.getElementById(id).classList.remove('open'); }
+let _mdTarget = null;
+document.addEventListener('mousedown', e => { _mdTarget = e.target; });
+document.querySelectorAll('.overlay').forEach(ov => {
+  ov.addEventListener('click', e => {
+    if (e.target === ov && _mdTarget === ov) ov.classList.remove('open');
+  });
+});
+async function api(url, method='GET', body=null) {
+  const opts = { method, headers: {'Content-Type':'application/json','X-CSRF-Token': document.querySelector('meta[name="csrf-token"]')?.content||''} };
+  if (body) opts.body = JSON.stringify(body);
+  return await fetch(url, opts);
+}
+
+// ── Load everything ───────────────────────────────────────────────────────────
+async function init() {
+  await loadProcesses();
+  await loadData();
+}
+
+// ── Processes ────────────────────────────────────────────────────────────────
+async function loadProcesses() {
+  const r = await api('/api/processes');
+  if (!r.ok) { toast('Failed to load processes','error'); return; }
+  allProcesses = await r.json();
+  renderProcessChips();
+  populateProcessDropdowns();
+}
+
+// ── Process Tabs ─────────────────────────────────────────────────────────────
+
+function switchTab(tabEl, procName) {
+  document.querySelectorAll('#processTabs .tab-item').forEach(t => t.classList.remove('active'));
+  tabEl.classList.add('active');
+  document.getElementById('filterProcess').value = procName;
+  document.getElementById('tableTitle').textContent =
+    procName ? `Task Names — ${procName}` : 'Task Names — All Mapping Processes';
+  renderTable();
+}
+
+function renderProcessTabs() {
+  const usageCounts = {};
+  allData.forEach(d => { usageCounts[d.process] = (usageCounts[d.process] || 0) + 1; });
+  const activeProc = document.getElementById('filterProcess').value;
+  const tabBar = document.getElementById('processTabs');
+
+  let html = `<div class="tab-item${!activeProc?' active':''}" data-proc="" onclick="switchTab(this,'')">
+    All <span class="tab-count">${allData.length}</span>
+  </div>`;
+
+  html += allProcesses.map(p => {
+    const count = usageCounts[p.name] || 0;
+    const safeQ = p.name.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+    return `<div class="tab-item${activeProc===p.name?' active':''}" data-proc="${escHtml(p.name)}"
+      onclick="switchTab(this,'${safeQ}')">
+      ${escHtml(p.name)} <span class="tab-count">${count}</span>
+    </div>`;
+  }).join('');
+
+  tabBar.innerHTML = html;
+}
+
+function toggleProcessManager() {
+  const body = document.getElementById('pmBody');
+  const icon = document.getElementById('pmToggleIcon');
+  const isOpen = body.style.display !== 'none';
+  body.style.display = isOpen ? 'none' : 'block';
+  icon.style.transform = isOpen ? 'rotate(0deg)' : 'rotate(180deg)';
+}
+
+function renderProcessChips() {
+  const container = document.getElementById('pmChips');
+  document.getElementById('pmCount').textContent =
+    `${allProcesses.length} mapping process${allProcesses.length !== 1 ? 'es' : ''}`;
+
+  if (!allProcesses.length) {
+    container.innerHTML = '<span class="pm-empty">No mapping processes yet — add one below.</span>';
+    renderProcessTabs();
+    return;
+  }
+
+  const usageCounts = {};
+  allData.forEach(d => { usageCounts[d.process] = (usageCounts[d.process] || 0) + 1; });
+
+  container.innerHTML = allProcesses.map(p => {
+    const count = usageCounts[p.name] || 0;
+    const safeQ = p.name.replace(/'/g, "\\'");
+    return `<div class="pm-chip" title="${escHtml(p.name)} — ${count} task${count!==1?'s':''}">
+      <span class="chip-name">${escHtml(p.name)}</span>
+      <span class="chip-count">${count} task${count !== 1 ? 's' : ''}</span>
+      <button class="chip-btn edit" onclick="event.stopPropagation();openEditProcess(${p.id},'${safeQ}')">✏️</button>
+      <button class="chip-btn del"  onclick="event.stopPropagation();deleteProcess(${p.id},'${safeQ}')">✕</button>
+    </div>`;
+  }).join('');
+
+  renderProcessTabs();
+}
+
+function filterByChip(procName) {
+  document.getElementById('filterProcess').value = procName;
+  document.getElementById('searchInput').value = '';
+  document.getElementById('filterStatus').value = '';
+  renderTable();
+  renderProcessChips();
+}
+
+function populateProcessDropdowns() {
+  const names = allProcesses.map(p => p.name);
+
+  // Filter dropdown in table
+  const fp = document.getElementById('filterProcess');
+  const fpVal = fp.value;
+  fp.innerHTML = '<option value="">All Mapping Processes</option>' +
+    names.map(n => `<option value="${n}"${fpVal===n?' selected':''}>${n}</option>`).join('');
+
+  // Add/Edit task name modal dropdown
+  const fd = document.getElementById('fieldProcess');
+  const fdVal = fd.value;
+  fd.innerHTML = '<option value="">— Select Mapping Process —</option>' +
+    names.map(n => `<option value="${n}"${fdVal===n?' selected':''}>${n}</option>`).join('');
+}
+
+async function addProcess() {
+  const input = document.getElementById('pmNewName');
+  const name  = input.value.trim();
+  if (!name) { toast('Enter a mapping process name','error'); return; }
+  const r = await api('/api/processes', 'POST', { name });
+  if (r.ok) {
+    input.value = '';
+    toast(`Mapping Process "${name}" added`);
+    await loadProcesses();
+    renderTable(); // update usage counts
+  } else {
+    const d = await r.json();
+    toast(d.error || 'Failed to add a mapping process','error');
+  }
+}
+
+function openEditProcess(id, name) {
+  document.getElementById('editProcessId').value = id;
+  document.getElementById('editProcessName').value = name;
+  openModal('editProcessModal');
+  setTimeout(() => document.getElementById('editProcessName').focus(), 120);
+}
+
+async function saveProcess() {
+  const id   = document.getElementById('editProcessId').value;
+  const name = document.getElementById('editProcessName').value.trim();
+  if (!name) { toast('Name cannot be empty','error'); return; }
+  const r = await api(`/api/processes/${id}`, 'PUT', { name });
+  if (r.ok) {
+    toast('Mapping Process renamed');
+    closeModal('editProcessModal');
+    await loadProcesses();
+    await loadData(); // task names now show updated process name
+  } else {
+    const d = await r.json();
+    toast(d.error || 'Rename failed','error');
+  }
+}
+
+async function deleteProcess(id, name) {
+  // Check usage first
+  const usage = allData.filter(d => d.process === name).length;
+  if (usage > 0) {
+    toast(`Cannot delete "${name}" — ${usage} task name(s) use it. Reassign them first.`, 'error');
+    return;
+  }
+  if (!confirm(`Delete mapping process "${name}"?`)) return;
+  const r = await api(`/api/processes/${id}`, 'DELETE');
+  if (r.ok) {
+    toast(`"${name}" deleted`);
+    await loadProcesses();
+  } else {
+    const d = await r.json();
+    toast(d.error || 'Delete failed','error');
+  }
+}
+
+// ── Task Names ────────────────────────────────────────────────────────────────
+async function loadData() {
+  const r = await api('/api/task-names');
+  if (!r.ok) { toast('Failed to load task names','error'); return; }
+  allData = await r.json();
+  updateStats();
+  renderTable();
+  renderProcessChips(); // refresh usage counts in chips
+}
+
+function updateStats() {
+  const active    = allData.filter(d => d.status === 'active').length;
+  const processes = [...new Set(allData.map(d => d.process))].length;
+  const avgCap    = allData.length
+    ? Math.round(allData.reduce((s,d) => s + d.cap_timing, 0) / allData.length) : 0;
+  document.getElementById('statTotal').textContent     = allData.length;
+  document.getElementById('statActive').textContent    = active;
+  document.getElementById('statProcesses').textContent = processes;
+  document.getElementById('statAvgCap').textContent    = avgCap;
+}
+
+function capPill(val) {
+  const cls = val > 120 ? 'danger' : val > 60 ? 'warn' : '';
+  return `<span class="cap-pill ${cls}">⏱ ${val} mins</span>`;
+}
+
+function renderTable() {
+  const search = document.getElementById('searchInput').value.toLowerCase();
+  const proc   = document.getElementById('filterProcess').value;
+  const status = document.getElementById('filterStatus').value;
+  // Sync table title with active process tab
+  const titleEl = document.getElementById('tableTitle');
+  if (titleEl) {
+    titleEl.textContent = proc ? `Task Names — ${proc}` : 'Task Names — All Mapping Processes';
+  }
+
+  const filtered = allData.filter(d =>
+    (!search || d.task_name.toLowerCase().includes(search) || d.process.toLowerCase().includes(search)) &&
+    (!proc   || d.process === proc) &&
+    (!status || d.status  === status)
+  );
+
+  document.getElementById('countLabel').textContent = `${filtered.length} of ${allData.length} records`;
+  const tbody = document.getElementById('taskNamesTbody');
+
+  if (!filtered.length) {
+    tbody.innerHTML = `<tr><td colspan="7">
+      <div class="empty"><div class="empty-icon">🏷️</div><div>No task names found</div></div>
+    </td></tr>`;
+    return;
+  }
+
+  tbody.innerHTML = filtered.map((d, i) => `
+    <tr>
+      <td style="color:var(--muted);font-size:.8rem">${i+1}</td>
+      <td><span class="process-chip">${d.process}</span></td>
+      <td style="font-weight:500">${d.task_name}</td>
+      <td>${capPill(d.cap_timing)}</td>
+      <td><span class="badge badge-${d.status}">${d.status.charAt(0).toUpperCase()+d.status.slice(1)}</span></td>
+      <td style="font-size:.8rem;color:var(--muted)">${d.created_at||'—'}</td>
+      <td style="white-space:nowrap">
+        <button class="btn btn-outline btn-sm" onclick="editRow(${d.id})">✏️ Edit</button>
+        <button class="btn btn-danger  btn-sm" onclick="deleteRow(${d.id})">🗑 Delete</button>
+      </td>
+    </tr>`).join('');
+}
+
+// ── Add / Edit Task Name ──────────────────────────────────────────────────────
+function openAddTaskName() {
+  document.getElementById('editId').value = '';
+  document.getElementById('addModalTitle').textContent = 'Add Task Name';
+  document.getElementById('fieldProcess').value   = '';
+  document.getElementById('fieldTaskName').value  = '';
+  document.getElementById('fieldCapTiming').value = '';
+  document.getElementById('fieldStatus').value    = 'active';
+  openModal('addModal');
+}
+
+function editRow(id) {
+  const d = allData.find(x => x.id === id); if (!d) return;
+  document.getElementById('editId').value = id;
+  document.getElementById('addModalTitle').textContent = 'Edit Task Name';
+  document.getElementById('fieldProcess').value   = d.process;
+  document.getElementById('fieldTaskName').value  = d.task_name;
+  document.getElementById('fieldCapTiming').value = d.cap_timing;
+  document.getElementById('fieldStatus').value    = d.status;
+  openModal('addModal');
+}
+
+async function saveTaskName() {
+  const eid     = document.getElementById('editId').value;
+  const process = document.getElementById('fieldProcess').value.trim();
+  const name    = document.getElementById('fieldTaskName').value.trim();
+  const cap     = parseInt(document.getElementById('fieldCapTiming').value);
+  const status  = document.getElementById('fieldStatus').value;
+
+  if (!process)       { toast('Mapping Process is required','error'); return; }
+  if (!name)          { toast('Task name is required','error'); return; }
+  if (!cap || cap < 1){ toast('Cap timing must be at least 1 min','error'); return; }
+
+  const body   = { process, task_name: name, cap_timing: cap, status };
+  const url    = eid ? `/api/task-names/${eid}` : '/api/task-names';
+  const method = eid ? 'PUT' : 'POST';
+  const r = await api(url, method, body);
+  if (r.ok) {
+    toast(eid ? 'Updated successfully' : 'Task name added');
+    closeModal('addModal');
+    await loadData();
+  } else {
+    const d = await r.json();
+    toast(d.error || 'Save failed','error');
+  }
+}
+
+async function deleteRow(id) {
+  if (!confirm('Delete this task name?')) return;
+  const r = await api(`/api/task-names/${id}`, 'DELETE');
+  if (r.ok) { toast('Deleted'); loadData(); }
+  else toast('Delete failed','error');
+}
+
+// ── Export ───────────────────────────────────────────────────────────────────
+function downloadTemplate() { window.location.href = '/api/task-names/template'; }
+
+async function exportVisible() {
+  // Build filtered rows from in-memory data and POST to server-side export
+  const search = document.getElementById('searchInput').value.toLowerCase();
+  const proc   = document.getElementById('filterProcess').value;
+  const status = document.getElementById('filterStatus').value;
+  const rows   = allData.filter(d =>
+    (!search || d.task_name.toLowerCase().includes(search) || d.process.toLowerCase().includes(search)) &&
+    (!proc   || d.process === proc) &&
+    (!status || d.status  === status)
+  );
+  if (!rows.length) { toast('No rows to export', 'error'); return; }
+  try {
+    const r = await fetch('/api/task-names/export', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': document.querySelector('meta[name="csrf-token"]')?.content||'' },
+      body: JSON.stringify({ ids: rows.map(r => r.id) }),
+    });
+    if (!r.ok) { toast('Export failed', 'error'); return; }
+    const blob = await r.blob();
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a'); a.href=url; a.download='task_names_export.xlsx'; a.click();
+    URL.revokeObjectURL(url);
+    toast(`Exported ${rows.length} rows`);
+  } catch(e) { toast('Export error', 'error'); }
+}
+
+// ── Import ───────────────────────────────────────────────────────────────────
+function handleDrop(e) {
+  e.preventDefault();
+  document.getElementById('importZone').classList.remove('drag');
+  const file = e.dataTransfer.files[0];
+  if (file) handleFile(file);
+}
+async function handleFile(file) {
+  if (!file || !file.name.toLowerCase().endsWith('.xlsx')) { toast('Please upload a .xlsx file','error'); return; }
+  const zone = document.getElementById('importZone');
+  zone.innerHTML = '<div class="zone-icon">⏳</div><div class="zone-title">Parsing file…</div>';
+  try {
+    const fd = new FormData();
+    fd.append('file', file);
+    const r = await fetch('/api/task-names/parse-xlsx', {
+      method: 'POST',
+      headers: { 'X-CSRF-Token': document.querySelector('meta[name="csrf-token"]')?.content||'' },
+      body: fd,
+    });
+    const d = await r.json();
+    if (!r.ok) { toast(d.error || 'Failed to parse file', 'error'); resetImport(); return; }
+    parseImportData(d.rows);
+  } catch(err) {
+    toast('Upload error: ' + err.message, 'error');
+    resetImport();
+  }
+}
+function parsePaste() {
+  const raw = document.getElementById('pasteArea').value.trim();
+  if (!raw) { toast('Nothing to parse','error'); return; }
+  const rows = raw.split('\n').map((line,i) => {
+    const parts = line.includes('\t') ? line.split('\t') : line.split(',');
+    const process   = (parts[0]||'').trim();
+    const task_name = (parts[1]||'').trim();
+    const cap       = parseInt((parts[2]||'').trim());
+    const errors = [];
+    if (!process)       errors.push('Missing Mapping Process');
+    if (!task_name)     errors.push('Missing Task');
+    if (isNaN(cap)||cap<1) errors.push('Invalid Cap Timing');
+    return { idx:i+1, process, task_name, cap_timing:isNaN(cap)?0:cap, errors, valid:errors.length===0 };
+  }).filter(r => r.process || r.task_name);
+  parseImportData(rows);
+}
+function stripApex(s){ return typeof s==='string'?s.replace(/^'+/,'').trim():s; }
+function normalizeKey(obj, ...keys) {
+  // Strip leading apostrophes Excel adds when it force-formats cells as text
+  const lk = Object.keys(obj).reduce((acc,k)=>{ acc[k.replace(/^'+/,'').toLowerCase().trim()]=k; return acc; },{});
+  for (const k of keys) { const m=lk[k.toLowerCase()]; if(m!==undefined) return stripApex(obj[m]); }
+  return '';
+}
+function parseImportData(data) {
+  // data comes pre-parsed from server (process, task_name, cap_timing, errors, valid already set)
+  importRows = data;
+  const validCount   = importRows.filter(r=>r.valid).length;
+  const invalidCount = importRows.length - validCount;
+  document.getElementById('importStep1').style.display = 'none';
+  document.getElementById('importStep2').style.display = 'block';
+  document.getElementById('previewLabel').textContent  = `Preview: ${importRows.length} rows found`;
+  document.getElementById('validCount').textContent    = `${validCount} valid, ${invalidCount} invalid`;
+  const result = document.getElementById('importResult');
+  if (invalidCount===0) {
+    result.className='import-result success';
+    result.textContent=`✅ All ${validCount} rows are valid and ready to import.`;
+  } else if (validCount===0) {
+    result.className='import-result error';
+    result.textContent=`❌ No valid rows found. Please fix the errors below.`;
+    document.getElementById('confirmImportBtn').disabled=true;
+  } else {
+    result.className='import-result partial';
+    result.textContent=`⚠️ ${validCount} valid rows will be imported. ${invalidCount} invalid rows will be skipped.`;
+    document.getElementById('confirmImportBtn').disabled=false;
+  }
+  result.style.display='block';
+  document.getElementById('previewTbody').innerHTML = importRows.map(r=>`
+    <tr style="${r.valid?'':'background:#fff8f7'}">
+      <td style="color:var(--muted);font-size:.8rem">${r.idx}</td>
+      <td>${r.process||'<span style="color:var(--red)">—</span>'}</td>
+      <td>${r.task_name||'<span style="color:var(--red)">—</span>'}</td>
+      <td>${isNaN(r.cap_timing)?'<span style="color:var(--red)">—</span>':r.cap_timing+' mins'}</td>
+      <td>${r.valid
+        ?'<span style="color:var(--green);font-weight:600">✅ Valid</span>'
+        :`<span style="color:var(--red);font-size:.75rem">❌ ${r.errors.join(', ')}</span>`}
+      </td>
+    </tr>`).join('');
+}
+async function confirmImport() {
+  const validRows = importRows.filter(r=>r.valid);
+  if (!validRows.length) { toast('No valid rows to import','error'); return; }
+  document.getElementById('confirmImportBtn').textContent = 'Importing…';
+  document.getElementById('confirmImportBtn').disabled = true;
+  const r = await api('/api/task-names/bulk','POST',{rows:validRows});
+  if (r.ok) {
+    const d = await r.json();
+    toast(`Imported ${d.imported} task names`);
+    closeModal('importModal'); resetImport(); loadData();
+  } else {
+    const d = await r.json();
+    toast(d.error||'Import failed','error');
+    document.getElementById('confirmImportBtn').textContent='✅ Import Valid Rows';
+    document.getElementById('confirmImportBtn').disabled=false;
+  }
+}
+function resetImport() {
+  document.getElementById('importStep1').style.display='block';
+  document.getElementById('importStep2').style.display='none';
+  document.getElementById('fileInput').value='';
+  document.getElementById('pasteArea').value='';
+  document.getElementById('importResult').style.display='none';
+  document.getElementById('confirmImportBtn').disabled=false;
+  document.getElementById('confirmImportBtn').textContent='✅ Import Valid Rows';
+  importRows=[];
+  // Restore drop zone
+  const zone = document.getElementById('importZone');
+  if (zone) zone.innerHTML = '<div class="zone-icon">📂</div><div class="zone-title">Click to browse or drag & drop</div><div class="zone-sub">Supports .xlsx files only</div>';
+}
+
+// Close overlays on outside click
+document.querySelectorAll('.overlay').forEach(ov => {
+  ov.addEventListener('click', e => {
+    if (e.target===ov) { ov.classList.remove('open'); resetImport(); }
+  });
+});
+
+// ── Boot ─────────────────────────────────────────────────────────────────────
+// CSRF token is read from <meta name='csrf-token'> — no sessionStorage needed
+init();
+</script>
+</body>
+</html>

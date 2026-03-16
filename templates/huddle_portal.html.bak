@@ -1,0 +1,922 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="csrf-token"  content="{{ csrf_token() }}">
+<meta name="user-id"    content="{{ user.id }}">
+<meta name="user-role"  content="{{ user.role }}">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Huddle Portal – Tasks</title>
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet">
+<style>
+:root{--ink:#0a0a0f;--paper:#f4f1eb;--accent:#ff4d2e;--green:#22c55e;--yellow:#eab308;--blue:#3b82f6;--purple:#a855f7;--red:#ef4444;--gold:#c9a84c;--card:#fff;--border:#e5e3dc;--muted:#888;--sw:240px;}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'DM Sans',sans-serif;background:var(--paper);color:var(--ink);min-height:100vh;display:flex;}
+.sidebar{width:var(--sw);background:var(--ink);display:flex;flex-direction:column;position:fixed;top:0;left:0;bottom:0;z-index:100;overflow:hidden;}
+.sb-brand{padding:22px 20px 16px;border-bottom:1px solid rgba(255,255,255,.07);}
+.sb-logo{font-family:'Syne',sans-serif;font-size:1.45rem;font-weight:800;color:#fff;letter-spacing:-1px;}
+.sb-logo em{color:var(--gold);font-style:normal;}
+.sb-sub{font-size:.6rem;letter-spacing:3px;text-transform:uppercase;color:rgba(255,255,255,.25);margin-top:5px;}
+.sb-user{padding:13px 20px;border-bottom:1px solid rgba(255,255,255,.07);display:flex;align-items:center;gap:10px;}
+.sb-avatar{width:32px;height:32px;border-radius:9px;background:var(--gold);display:flex;align-items:center;justify-content:center;font-family:'Syne',sans-serif;font-weight:700;font-size:.8rem;color:var(--ink);flex-shrink:0;}
+.sb-uname{font-size:.85rem;font-weight:500;color:#fff;}
+.sb-role{font-size:.68rem;color:rgba(255,255,255,.32);text-transform:capitalize;}
+.sb-nav{padding:10px 10px;flex:1;overflow-y:auto;}
+.nav-lbl{font-size:.58rem;letter-spacing:2.5px;text-transform:uppercase;color:rgba(255,255,255,.22);padding:12px 10px 5px;}
+.ni{display:flex;align-items:center;gap:10px;padding:9px 10px;border-radius:8px;color:rgba(255,255,255,.52);font-size:.875rem;transition:all .15s;margin-bottom:1px;text-decoration:none;}
+.ni.active,.ni:hover{background:rgba(255,255,255,.07);color:#fff;}
+.ni.active{color:var(--gold);}
+.ni-icon{width:20px;text-align:center;}
+.sb-stats{padding:12px 14px;margin:8px 10px;border-radius:10px;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.06);}
+.sb-stat{display:flex;justify-content:space-between;align-items:center;padding:5px 0;font-size:.78rem;}
+.sb-stat span:first-child{color:rgba(255,255,255,.38);}
+.sb-stat strong{color:#fff;font-family:'Syne',sans-serif;}
+.sb-foot{padding:14px 20px;border-top:1px solid rgba(255,255,255,.07);display:flex;flex-direction:column;gap:8px;flex-shrink:0;}
+.sw-btn{display:flex;align-items:center;gap:8px;padding:9px 12px;border-radius:8px;background:rgba(255,77,46,.1);border:1px solid rgba(255,77,46,.22);color:var(--accent);font-size:.8rem;cursor:pointer;text-decoration:none;transition:all .15s;}
+.sw-btn:hover{background:rgba(255,77,46,.18);}
+.lo-btn{display:flex;align-items:center;justify-content:center;gap:8px;padding:9px 12px;border-radius:8px;background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.22);color:#f87171;font-size:.8rem;font-weight:500;text-decoration:none;cursor:pointer;transition:all .15s;}
+.lo-btn:hover{background:rgba(239,68,68,.22);color:#fff;border-color:rgba(239,68,68,.5);}
+.main{margin-left:var(--sw);flex:1;display:flex;flex-direction:column;min-height:100vh;min-width:0;overflow-x:hidden;}
+.topbar{background:var(--card);border-bottom:1px solid var(--border);padding:10px 20px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:50;gap:8px;min-width:0;overflow:hidden;}
+.page-title{font-family:'Syne',sans-serif;font-size:1.1rem;font-weight:700;white-space:nowrap;flex-shrink:0;}
+.tb-right{display:flex;gap:5px;align-items:center;flex-wrap:nowrap;flex-shrink:0;}
+.tb-clock{display:flex;flex-direction:column;align-items:flex-end;line-height:1.25;margin-right:4px;flex-shrink:0;}
+.tb-clock .tc-time{font-family:'Syne',sans-serif;font-size:.92rem;font-weight:700;letter-spacing:.5px;color:var(--ink);}
+.tb-clock .tc-date{font-size:.67rem;color:var(--muted);letter-spacing:.3px;}
+.content{padding:22px 26px;}
+.btn{padding:7px 14px;border-radius:8px;font-family:'DM Sans',sans-serif;font-size:.82rem;font-weight:500;cursor:pointer;border:none;transition:all .15s;display:inline-flex;align-items:center;gap:5px;white-space:nowrap;}
+.btn-primary{background:var(--ink);color:#fff;}.btn-primary:hover{background:#333;}
+.btn-gold{background:var(--gold);color:var(--ink);}.btn-gold:hover{opacity:.88;}
+.btn-outline{background:transparent;border:1.5px solid var(--border);color:var(--ink);}.btn-outline:hover{border-color:var(--ink);}
+.btn-green{background:var(--green);color:#fff;}.btn-green:hover{opacity:.88;}
+.btn-danger{background:var(--red);color:#fff;}.btn-danger:hover{opacity:.85;}
+.btn-sm{padding:5px 11px;font-size:.78rem;}
+.qstats{display:grid;grid-template-columns:repeat(auto-fit,minmax(125px,1fr));gap:11px;margin-bottom:20px;}
+.qcard{background:var(--card);border:1px solid var(--border);border-radius:11px;padding:14px 16px;position:relative;overflow:hidden;}
+.qcard::before{content:'';position:absolute;top:0;left:0;right:0;height:3px;background:var(--c,var(--gold));}
+.qv{font-family:'Syne',sans-serif;font-size:1.65rem;font-weight:800;line-height:1;margin-bottom:3px;}
+.ql{font-size:.67rem;color:var(--muted);text-transform:uppercase;letter-spacing:1px;}
+.tbar{display:flex;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap;}
+.tbar input[type=text]{flex:1;min-width:200px;padding:8px 13px;border:1.5px solid var(--border);border-radius:8px;font-family:'DM Sans',sans-serif;font-size:.84rem;background:var(--card);outline:none;transition:border-color .15s;}
+.tbar input[type=text]:focus{border-color:var(--gold);}
+.result-count{font-size:.8rem;color:var(--muted);white-space:nowrap;}
+.pills{display:flex;flex-wrap:wrap;gap:5px;min-height:0;margin-bottom:10px;}
+.pill{display:inline-flex;align-items:center;gap:4px;background:rgba(201,168,76,.12);border:1px solid rgba(201,168,76,.3);font-size:.74rem;padding:3px 9px 3px 10px;border-radius:20px;}
+.pill-x{background:none;border:none;cursor:pointer;color:var(--muted);font-size:.9rem;line-height:1;padding:0;}
+.pill-x:hover{color:var(--red);}
+.imp-banner{padding:10px 14px;border-radius:8px;font-size:.83rem;margin-bottom:12px;}
+.imp-banner.ok{background:#dcfce7;color:#14532d;border:1px solid #86efac;}
+.imp-banner.err{background:#fee2e2;color:#991b1b;border:1px solid #fca5a5;}
+.imp-banner.warn{background:#fef9c3;color:#854d0e;border:1px solid #fde68a;}
+.panel{background:var(--card);border:1px solid var(--border);border-radius:12px;overflow:hidden;margin-bottom:16px;}
+.ph{padding:13px 18px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;}
+.pt{font-family:'Syne',sans-serif;font-weight:700;font-size:.92rem;}
+.tbl-wrap{overflow-x:auto;}
+table{width:100%;border-collapse:collapse;font-size:.81rem;}
+thead tr.th-lbl th{background:#f9f8f5;padding:9px 9px 7px;text-align:left;font-size:.62rem;text-transform:uppercase;letter-spacing:.9px;color:var(--muted);font-weight:600;border-bottom:1px solid var(--border);white-space:nowrap;cursor:pointer;user-select:none;}
+thead tr.th-lbl th:hover{color:var(--ink);}
+thead tr.th-lbl th.sort-asc::after{content:' ▲';font-size:.55rem;opacity:.7;}
+thead tr.th-lbl th.sort-desc::after{content:' ▼';font-size:.55rem;opacity:.7;}
+thead tr.th-lbl th.no-sort{cursor:default;}thead tr.th-lbl th.no-sort:hover{color:var(--muted);}
+thead tr.th-fil th{background:#faf9f6;padding:4px 5px;border-bottom:2px solid var(--border);}
+thead tr.th-fil th select,thead tr.th-fil th input{width:100%;padding:4px 7px;border:1.5px solid var(--border);border-radius:6px;font-family:'DM Sans',sans-serif;font-size:.74rem;background:#fff;outline:none;color:var(--ink);transition:border-color .15s;}
+thead tr.th-fil th select:focus,thead tr.th-fil th input:focus{border-color:var(--gold);}
+thead tr.th-fil th.nf{background:#faf9f6;}
+tbody td{padding:9px 9px;border-bottom:1px solid var(--border);vertical-align:middle;}
+tbody tr:last-child td{border-bottom:none;}
+tbody tr:hover{background:#fafaf8;}
+.mono{font-family:monospace;font-size:.75rem;color:#555;}
+.badge{display:inline-block;padding:2px 8px;border-radius:20px;font-size:.67rem;font-weight:500;text-transform:capitalize;white-space:nowrap;}
+.badge-pending{background:#fef9c3;color:#854d0e;}
+.badge-in_progress{background:#dbeafe;color:#1e40af;}
+.badge-review{background:#f3e8ff;color:#6b21a8;}
+.badge-done{background:#dcfce7;color:#14532d;}
+.badge-blocked{background:#fee2e2;color:#991b1b;}
+.badge-low{background:#f1f5f9;color:#475569;}
+.badge-medium{background:#fef9c3;color:#854d0e;}
+.badge-high{background:#fed7aa;color:#9a3412;}
+.badge-critical{background:#fee2e2;color:#991b1b;}
+.overlay{position:fixed;inset:0;background:rgba(10,10,15,.65);backdrop-filter:blur(4px);z-index:200;display:none;align-items:center;justify-content:center;}
+.overlay.open{display:flex;}
+.modal{background:var(--card);border-radius:16px;width:540px;max-width:95vw;max-height:92vh;overflow-y:auto;box-shadow:0 24px 70px rgba(0,0,0,.3);}
+.modal-lg{width:700px;}
+.mh{padding:20px 24px 0;display:flex;align-items:center;justify-content:space-between;}
+.mt{font-family:'Syne',sans-serif;font-size:1.05rem;font-weight:700;}
+.mc{background:none;border:none;font-size:1.35rem;cursor:pointer;color:var(--muted);line-height:1;}
+.mb{padding:16px 24px 24px;}
+.fr{display:grid;grid-template-columns:1fr 1fr;gap:11px;}
+.fg{margin-bottom:12px;}
+.fg label{display:block;font-size:.71rem;font-weight:600;text-transform:uppercase;letter-spacing:.8px;margin-bottom:5px;color:var(--muted);}
+.fg input,.fg select,.fg textarea{width:100%;padding:9px 12px;border:1.5px solid var(--border);border-radius:8px;font-family:'DM Sans',sans-serif;font-size:.875rem;outline:none;transition:border-color .15s;color:var(--ink);}
+.fg input:focus,.fg select:focus,.fg textarea:focus{border-color:var(--gold);}
+.fg textarea{resize:vertical;min-height:64px;}
+.cap-badge{padding:9px 12px;border:1.5px solid #bae6fd;border-radius:8px;background:#f0f9ff;color:#0369a1;font-weight:600;font-size:.9rem;display:flex;align-items:center;min-height:40px;}
+.ma{display:flex;gap:8px;justify-content:flex-end;margin-top:6px;}
+.dg{display:grid;grid-template-columns:1fr 1fr;gap:13px;margin-bottom:16px;}
+.dg .df label{display:block;font-size:.67rem;color:var(--muted);text-transform:uppercase;letter-spacing:.8px;margin-bottom:3px;}
+.drop-zone{border:2px dashed var(--border);border-radius:10px;padding:28px;text-align:center;cursor:pointer;transition:all .2s;margin-bottom:14px;}
+.drop-zone:hover,.drop-zone.drag{border-color:var(--gold);background:#fffdf5;}
+.drop-zone p{color:var(--muted);font-size:.85rem;margin-top:7px;}
+.prev-wrap{max-height:200px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;margin-bottom:11px;}
+.toast{position:fixed;bottom:22px;right:22px;background:var(--ink);color:#fff;padding:11px 20px;border-radius:10px;font-size:.875rem;z-index:999;transform:translateY(80px);opacity:0;transition:all .3s;}
+.toast.show{transform:translateY(0);opacity:1;}
+.empty{text-align:center;padding:46px 20px;color:var(--muted);}
+.ei{font-size:2.2rem;margin-bottom:8px;opacity:.4;}
+::-webkit-scrollbar{width:5px;height:5px;}
+::-webkit-scrollbar-thumb{background:#d0cdc7;border-radius:3px;}
+</style>
+</head>
+<body>
+
+<aside class="sidebar">
+  <div class="sb-brand">
+    <div class="sb-logo">Huddle<em>.</em></div>
+    <div class="sb-sub">Huddle Portal</div>
+  </div>
+  <div class="sb-user">
+    <div class="sb-avatar">{{ user.username[0].upper() }}</div>
+    <div>
+      <div class="sb-uname">{{ user.username }}</div>
+      <div class="sb-role">{{ user.role }}</div>
+    </div>
+  </div>
+  <nav class="sb-nav">
+    <div class="nav-lbl">Workspace</div>
+    <div class="ni active"><span class="ni-icon">&#9989;</span>My Tasks</div>
+    <div class="nav-lbl">Quick Stats</div>
+    <div class="sb-stats" id="sbStats">
+      <div class="sb-stat"><span>Loading&#8230;</span></div>
+    </div>
+  </nav>
+  <div class="sb-foot">
+    {% if user.role in ['admin','lead'] %}
+    <a class="sw-btn" href="/admin">&#9881;&#65039; Switch to Admin Portal</a>
+    {% endif %}
+    <a class="lo-btn" href="/logout">⏻ Sign Out</a>
+  </div>
+</aside>
+
+<div class="main">
+  <div class="topbar">
+    <div class="page-title">&#127919; Tasks</div>
+    <div class="tb-clock" id="tbClock">
+      <span class="tc-time" id="tcTime">--:-- --</span>
+      <span class="tc-date" id="tcDate">--- --, ----</span>
+    </div>
+    <div class="tb-right">
+      <button class="btn btn-outline btn-sm" onclick="exportExcel()" title="Export current view to Excel">&#128229; <span style="font-size:.75rem">Export</span></button>
+      <button class="btn btn-outline btn-sm" onclick="openModal('mImport')" title="Import tasks from Excel">&#128228; <span style="font-size:.75rem">Import</span></button>
+      <button class="btn btn-outline btn-sm" onclick="downloadTemplate()" title="Download blank template">&#128203; <span style="font-size:.75rem">Template</span></button>
+      <button class="btn btn-outline btn-sm" onclick="loadTasks()" title="Refresh">&#8635;</button>
+      <button class="btn btn-gold" onclick="openNewTask()" style="padding:8px 16px;font-size:.85rem;font-weight:700;white-space:nowrap;">+ New Task</button>
+    </div>
+  </div>
+
+  <div class="content">
+    <div class="qstats" id="qStats"></div>
+    <div class="tbar">
+      <input type="text" id="gSearch" placeholder="&#128269;  Search Study ID, SR/RFC, task name, assignee&#8230;" oninput="applyFilters()">
+      <span class="result-count" id="tCount"></span>
+    </div>
+    <div class="pills" id="activePills"></div>
+
+    <div class="panel">
+      <div class="ph">
+        <span class="pt">Task List</span>
+        <span style="font-size:.72rem;color:var(--muted)">Click column header to sort &#183; Use filter row to filter per column</span>
+      </div>
+      <div class="tbl-wrap">
+        <table>
+          <thead>
+            <tr class="th-lbl">
+              <th onclick="sortBy('study_id')"        data-col="study_id">Study ID</th>
+              <th onclick="sortBy('sr_rfc')"           data-col="sr_rfc">SR / RFC</th>
+              <th onclick="sortBy('process')"          data-col="process">Mapping Process</th>
+              <th onclick="sortBy('task_name')"        data-col="task_name">Task Name</th>
+              <th onclick="sortBy('subtask')"          data-col="subtask">Sub Task</th>
+              <th onclick="sortBy('assignee_name')"    data-col="assignee_name">Assignee</th>
+              <th onclick="sortBy('enterprise_id')"    data-col="enterprise_id">Ent. ID</th>
+              <th onclick="sortBy('turnaround_time')"  data-col="turnaround_time">TAT (min)</th>
+              <th onclick="sortBy('volume')"           data-col="volume">Vol</th>
+              <th onclick="sortBy('started_at')"       data-col="started_at">Start Date</th>
+              <th onclick="sortBy('due_date')"         data-col="due_date">Due Date</th>
+              <th onclick="sortBy('status')"           data-col="status">Status</th>
+              <th onclick="sortBy('priority')"         data-col="priority">Priority</th>
+              <th class="no-sort">Actions</th>
+            </tr>
+            <tr class="th-fil">
+              <th><input  id="cf_study_id"  type="text"   placeholder="filter&#8230;" oninput="applyFilters()"></th>
+              <th><input  id="cf_sr_rfc"    type="text"   placeholder="filter&#8230;" oninput="applyFilters()"></th>
+              <th><select id="cf_process"   onchange="applyFilters()"><option value="">All Mapping Processes</option></select></th>
+              <th><input  id="cf_task_name" type="text"   placeholder="filter&#8230;" oninput="applyFilters()"></th>
+              <th><input  id="cf_subtask"   type="text"   placeholder="filter&#8230;" oninput="applyFilters()"></th>
+              <th><select id="cf_assignee"  onchange="applyFilters()"><option value="">All</option></select></th>
+              <th><input  id="cf_ent_id"    type="text"   placeholder="filter&#8230;" oninput="applyFilters()"></th>
+              <th><input  id="cf_tat"       type="number" placeholder="&#8804;" oninput="applyFilters()" style="width:60px"></th>
+              <th><input  id="cf_vol"       type="number" placeholder="&#8805;" oninput="applyFilters()" style="width:60px"></th>
+              <th><input  id="cf_started"   type="date"   onchange="applyFilters()"></th>
+              <th><input  id="cf_due"       type="date"   onchange="applyFilters()"></th>
+              <th><select id="cf_status"    onchange="applyFilters()">
+                    <option value="">All</option>
+                    <option value="pending">Pending</option>
+                    <option value="in_progress">In Progress</option>
+                    <option value="review">Review</option>
+                    <option value="done">Done</option>
+                    <option value="blocked">Blocked</option>
+                  </select></th>
+              <th><select id="cf_priority"  onchange="applyFilters()">
+                    <option value="">All</option>
+                    <option value="low">Low</option>
+                    <option value="medium">Medium</option>
+                    <option value="high">High</option>
+                    <option value="critical">Critical</option>
+                  </select></th>
+              <th class="nf"></th>
+            </tr>
+          </thead>
+          <tbody id="tBody"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ADD / EDIT MODAL -->
+<div class="overlay" id="mTask">
+  <div class="modal modal-lg">
+    <div class="mh">
+      <span class="mt" id="mTaskTitle">New Task</span>
+      <button class="mc" onclick="closeModal('mTask')">&#215;</button>
+    </div>
+    <div class="mb">
+      <input type="hidden" id="eTaskId">
+      <!-- Study ID: manually entered on New; shown read-only on Edit -->
+      <div class="fg" id="studyIdRow">
+        <label>Study ID *</label>
+        <input type="text" id="tStudyId" placeholder="e.g. STD-2024-001" maxlength="50">
+        <div id="tStudyIdDisplay" style="display:none;padding:9px 12px;border:1.5px solid var(--border);border-radius:8px;background:#f9f8f5;font-family:monospace;font-size:.9rem;color:#444;letter-spacing:.5px"></div>
+      </div>
+      <div class="fg"><label>SR / RFC <span style="font-size:.68rem;font-weight:400;text-transform:none;color:var(--muted)">(optional)</span></label><input type="text" id="tSrRfc" placeholder="e.g. RFC-2024-1001"></div>
+      <div class="fr">
+        <div class="fg">
+          <label>Mapping Process *</label>
+          <select id="tProcess" onchange="filterTNByProcess()"><option value="">&#8212; Select Mapping Process &#8212;</option></select>
+        </div>
+        <div class="fg"><label>Cap Timing</label><div class="cap-badge" id="capBadge">&#8212;</div></div>
+      </div>
+      <div class="fg">
+        <label>Task Name * <span style="font-size:.7rem;font-weight:400;text-transform:none;color:var(--muted)">(from Task Names list)</span></label>
+        <select id="tTaskName" onchange="onTNSelect()"><option value="">&#8212; Select Task Name &#8212;</option></select>
+        <div style="margin-top:5px;font-size:.73rem;color:var(--muted)">
+          Can't find it? <a href="/admin" target="_blank" style="color:var(--gold);text-decoration:none;font-weight:600">Add in Admin Portal &#8594; Task Names</a>
+        </div>
+      </div>
+      <div class="fg">
+        <label>Sub Task <span style="font-size:.67rem;font-weight:400;text-transform:none;color:var(--muted)">(letters &amp; numbers only)</span></label>
+        <input type="text" id="tSubtask" placeholder="Optional subtask detail&#8230;"
+               oninput="this.value=this.value.replace(/[^a-zA-Z0-9 ]/g,'')"
+               onpaste="setTimeout(()=>this.value=this.value.replace(/[^a-zA-Z0-9 ]/g,''),0)">
+        <div id="tSubtaskErr" style="display:none;font-size:.72rem;color:var(--red);margin-top:3px">⚠ Only letters, numbers and spaces are allowed</div>
+      </div>
+      <div class="fr">
+        <div class="fg"><label>Assigned To *</label><select id="tAssignee"><option value="">&#8212; Select Assignee &#8212;</option></select></div>
+        <div class="fg"><label>Priority</label>
+          <select id="tPri">
+            <option value="low">Low</option><option value="medium" selected>Medium</option>
+            <option value="high">High</option><option value="critical">Critical</option>
+          </select>
+        </div>
+      </div>
+      <div class="fr">
+        <div class="fg"><label>Turnaround Time (mins) *</label><input type="number" id="tTAT" placeholder="e.g. 60" min="1" max="99999"></div>
+        <div class="fg"><label>Volume</label><input type="number" id="tVol" value="1" min="1"></div>
+      </div>
+      <div class="fr">
+        <div class="fg">
+          <label>Start Date *</label>
+          <input type="date" id="tStarted">
+          <div style="margin-top:4px;font-size:.7rem;color:var(--muted)">Auto-sets when status &#8594; In Progress</div>
+        </div>
+        <div class="fg"><label>Due Date *</label><input type="date" id="tDue"></div>
+      </div>
+      <div class="fg"><label>Status</label>
+        <select id="tStat">
+          <option value="pending">Pending</option><option value="in_progress">In Progress</option>
+          <option value="review">Review</option><option value="done">Done</option>
+          <option value="blocked">Blocked</option>
+        </select>
+      </div>
+      <div class="fg"><label>Notes</label><textarea id="tNotes" placeholder="Additional context&#8230;"></textarea></div>
+      <div class="ma">
+        <button class="btn btn-outline" onclick="closeModal('mTask')">Cancel</button>
+        <button class="btn btn-gold"    onclick="saveTask()">Save Task</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- DETAIL MODAL -->
+<div class="overlay" id="mDetail">
+  <div class="modal modal-lg">
+    <div class="mh"><span class="mt">Task Details</span><button class="mc" onclick="closeModal('mDetail')">&#215;</button></div>
+    <div class="mb" id="mDetailBody"></div>
+  </div>
+</div>
+
+<!-- IMPORT MODAL -->
+<div class="overlay" id="mImport">
+  <div class="modal modal-lg">
+    <div class="mh">
+      <span class="mt">&#128228; Import Tasks from Excel</span>
+      <button class="mc" onclick="closeModal('mImport');resetImport()">&#215;</button>
+    </div>
+    <div class="mb">
+      <p style="font-size:.83rem;color:var(--muted);margin-bottom:10px">
+        Upload the <strong>Task Names template</strong> (Mapping Process + Task Name columns) <em>or</em> the full
+        <strong>Tasks template</strong> (SR/RFC, Project Code, Task Name).
+        The format is detected automatically.
+        <button class="btn btn-outline btn-sm" onclick="downloadTemplate()" style="margin-left:6px">&#128203; Download Tasks Template</button>
+      </p>
+      <div id="impModeTag" style="display:none;margin-bottom:10px;padding:6px 12px;border-radius:6px;font-size:.78rem;font-weight:600;"></div>
+      <div class="drop-zone" id="dropZone" onclick="el('fileInput').click()">
+        <div style="font-size:2.2rem">&#128194;</div>
+        <p>Click or drag &amp; drop your .xlsx file here</p>
+      </div>
+      <input type="file" id="fileInput" accept=".xlsx,.xls" style="display:none" onchange="handleFile(this.files[0])">
+      <div id="impPreview" style="display:none">
+        <div style="font-size:.8rem;color:var(--muted);margin-bottom:6px" id="impPreviewLabel"></div>
+        <div class="prev-wrap">
+          <table style="width:100%;font-size:.75rem">
+            <thead><tr id="impTHead" style="background:#f9f8f5"></tr></thead>
+            <tbody id="impTBody"></tbody>
+          </table>
+        </div>
+        <div id="impResult" style="display:none;padding:10px 14px;border-radius:8px;font-size:.83rem;margin-bottom:10px;"></div>
+        <div class="ma">
+          <button class="btn btn-outline" onclick="resetImport()">Clear</button>
+          <button class="btn btn-green" id="bConfirmImport" onclick="confirmImport()">&#10003; Import All Rows</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+
+<div class="toast" id="toast"></div>
+
+<script>
+/* BUG-FIX: HTML-escape helper prevents XSS when user-controlled strings are
+   injected into innerHTML template literals. Always wrap untrusted data. */
+function escHtml(s) {
+  if (s == null) return '';
+  return String(s)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+
+/* ── State ── */
+let allTasks=[], visibleTasks=[], allProjects=[], allUsers=[], allTN=[];
+const USER_ID   = parseInt(document.querySelector('meta[name="user-id"]')?.content  || '0');
+const USER_ROLE = document.querySelector('meta[name="user-role"]')?.content || 'member';
+const CAN_SEE_ALL = USER_ROLE === 'admin' || USER_ROLE === 'lead';
+let sortCol='created_at', sortDir=-1;
+let impHeaderMap=[], importRows=[];
+
+/* ── Helpers ── */
+const el=id=>document.getElementById(id);
+const val=id=>el(id)?el(id).value:'';
+function showToast(msg,type='success'){
+  const t=el('toast');t.textContent=(type==='success'?'✅ ':'❌ ')+msg;
+  t.className='toast show';setTimeout(()=>t.className='toast',3400);
+}
+function openModal(id){
+  const ov = el(id);
+  ov.classList.add('open');
+  // Belt-and-suspenders: stop clicks inside the modal box from reaching the overlay
+  const box = ov.querySelector('.modal');
+  if(box && !box._spBound){
+    box.addEventListener('mousedown', e => e.stopPropagation());
+    box._spBound = true;
+  }
+}
+function closeModal(id){el(id).classList.remove('open');}
+function bdg(v){return `<span class="badge badge-${v||'pending'}">${(v||'pending').replace('_',' ')}</span>`;}
+async function api(url,method='GET',body=null){
+  const opts={method,headers:{'Content-Type':'application/json','X-CSRF-Token':document.querySelector('meta[name="csrf-token"]')?.content||''}};
+  if(body)opts.body=JSON.stringify(body);
+  return fetch(url,opts);
+}
+
+/* ── Init ── */
+async function init(){
+  try{
+    // PERF: Fetch all master data in parallel instead of 4 sequential round-trips
+    const [prRes, usRes, tnRes, procRes] = await Promise.all([
+      api('/api/projects'),
+      api('/api/users'),
+      api('/api/task-names'),
+      api('/api/processes'),
+    ]);
+    const [pr, us, tnRaw, procData] = await Promise.all([
+      prRes.json(), usRes.json(), tnRes.json(), procRes.json(),
+    ]);
+
+    allProjects = pr;
+    allUsers = us;
+    el('tAssignee').innerHTML='<option value="">— Select Assignee —</option>'+us.map(u=>`<option value="${u.id}">${escHtml(u.username)} (${escHtml(u.enterprise_id)})</option>`).join('');
+    el('cf_assignee').innerHTML='<option value="">All</option>'+us.map(u=>`<option value="${escHtml(u.username)}">${escHtml(u.username)}</option>`).join('');
+
+    allTN = tnRaw.filter(t=>t.status==='active');
+    // Derive process list from TaskName records, merge with Process Manager list
+    const procManagerNames = procData.map(p=>p.name);
+    const tnProcessNames = [...new Set(allTN.map(t=>t.process.trim()))];
+    const seen = new Set(tnProcessNames.map(p=>p.toLowerCase()));
+    for(const p of procManagerNames){if(!seen.has(p.toLowerCase())){tnProcessNames.push(p);seen.add(p.toLowerCase());}}
+    const procs = tnProcessNames.sort((a,b)=>a.localeCompare(b));
+    el('tProcess').innerHTML='<option value="">— Select Mapping Process —</option>'+procs.map(p=>`<option value="${escHtml(p)}">${escHtml(p)}</option>`).join('');
+    el('cf_process').innerHTML='<option value="">All Mapping Processes</option>'+procs.map(p=>`<option value="${escHtml(p)}">${escHtml(p)}</option>`).join('');
+    buildTNDropdown('');
+  }catch(e){showToast('Failed to load master data','error');console.error(e);}
+
+  // PERF: load tasks and stats in parallel
+  await Promise.all([loadTasks(), loadStats()]);
+  setupDropZone();
+}
+
+/* ── Stats ── */
+async function loadStats(){
+  try{
+    const d=await(await api('/api/analytics')).json();
+    el('qStats').innerHTML=[
+      {l:'Total',v:d.total_tasks,c:'--gold'},{l:'Pending',v:d.pending_tasks,c:'--yellow'},
+      {l:'In Progress',v:d.in_progress,c:'--blue'},{l:'Done',v:d.done_tasks,c:'--green'},
+      {l:'Blocked',v:d.blocked,c:'--red'},
+    ].map(s=>`<div class="qcard" style="--c:var(${s.c})"><div class="qv">${s.v}</div><div class="ql">${s.l}</div></div>`).join('');
+    el('sbStats').innerHTML=[['Total',d.total_tasks],['Done',d.done_tasks],['Volume',d.total_volume]]
+      .map(([l,v])=>`<div class="sb-stat"><span>${l}</span><strong>${v}</strong></div>`).join('');
+  }catch(e){console.error(e);}
+}
+
+/* ── Load ── */
+async function loadTasks(){
+  try{allTasks=await(await api('/api/tasks')).json();applyFilters();}
+  catch(e){showToast('Could not load tasks','error');}
+}
+
+/* ── Filter ── */
+function applyFilters(){
+  const gs=val('gSearch').toLowerCase().trim();
+  const f={
+    study_id:val('cf_study_id').toLowerCase().trim(),sr_rfc:val('cf_sr_rfc').toLowerCase().trim(),
+    process:val('cf_process'),task_name:val('cf_task_name').toLowerCase().trim(),
+    subtask:val('cf_subtask').toLowerCase().trim(),assignee:val('cf_assignee'),
+    ent_id:val('cf_ent_id').toLowerCase().trim(),tat:val('cf_tat'),vol:val('cf_vol'),
+    started:val('cf_started'),due:val('cf_due'),status:val('cf_status'),priority:val('cf_priority'),
+  };
+  visibleTasks=allTasks.filter(t=>{
+    if(gs&&!`${t.study_id} ${t.sr_rfc} ${t.task_name||''} ${t.assignee_name||''}`.toLowerCase().includes(gs))return false;
+    if(f.study_id&&!t.study_id.toLowerCase().includes(f.study_id))return false;
+    if(f.sr_rfc&&!t.sr_rfc.toLowerCase().includes(f.sr_rfc))return false;
+    if(f.process&&t.process!==f.process)return false;
+    if(f.task_name&&!t.task_name.toLowerCase().includes(f.task_name))return false;
+    if(f.subtask&&!(t.subtask||'').toLowerCase().includes(f.subtask))return false;
+    if(f.assignee&&t.assignee_name!==f.assignee)return false;
+    if(f.ent_id&&!(t.enterprise_id||'').toLowerCase().includes(f.ent_id))return false;
+    if(f.tat&&!(t.turnaround_time!=null&&t.turnaround_time<=+f.tat))return false;
+    if(f.vol&&!(t.volume>=+f.vol))return false;
+    if(f.started&&!(t.started_at||'').startsWith(f.started))return false;
+    if(f.due&&t.due_date!==f.due)return false;
+    if(f.status&&t.status!==f.status)return false;
+    if(f.priority&&t.priority!==f.priority)return false;
+    return true;
+  });
+  doSort();renderRows();renderPills(gs,f);
+}
+
+/* ── Sort ── */
+function sortBy(col){
+  sortDir=(sortCol===col)?-sortDir:1;sortCol=col;
+  document.querySelectorAll('thead tr.th-lbl th').forEach(th=>{
+    th.classList.remove('sort-asc','sort-desc');
+    if(th.dataset.col===col)th.classList.add(sortDir===1?'sort-asc':'sort-desc');
+  });
+  doSort();renderRows();
+}
+function doSort(){
+  visibleTasks.sort((a,b)=>{
+    let av=a[sortCol]??'',bv=b[sortCol]??'';
+    if(typeof av==='number')return(av-bv)*sortDir;
+    return String(av).localeCompare(String(bv))*sortDir;
+  });
+}
+
+/* ── Render ── */
+function renderRows(){
+  el('tCount').textContent=`${visibleTasks.length} of ${allTasks.length} tasks`;
+  const tb=el('tBody');
+  if(!visibleTasks.length){
+    tb.innerHTML='<tr><td colspan="14"><div class="empty"><div class="ei">🔍</div>No tasks match the current filters</div></td></tr>';return;
+  }
+  tb.innerHTML=visibleTasks.map(t=>{
+    const sd=t.started_at?t.started_at.split(' ')[0]:'—';
+    const isOwn   = t.assigned_to===USER_ID || t.created_by_id===USER_ID;
+    const canEdit = CAN_SEE_ALL || isOwn;
+    const canDel  = CAN_SEE_ALL || t.created_by_id===USER_ID;
+    return `<tr>
+      <td><span class="mono">${escHtml(t.study_id)}</span></td>
+      <td><span class="mono">${escHtml(t.sr_rfc)}</span></td>
+      <td style="font-size:.79rem">${escHtml(t.process)||'—'}</td>
+      <td style="max-width:155px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:500" title="${escHtml(t.task_name)}">${escHtml(t.task_name)}</td>
+      <td style="max-width:120px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--muted);font-size:.79rem" title="${escHtml(t.subtask||'')}">${escHtml(t.subtask)||'—'}</td>
+      <td style="white-space:nowrap">${escHtml(t.assignee_name)}</td>
+      <td><span class="mono" style="color:var(--muted)">${escHtml(t.enterprise_id)||'—'}</span></td>
+      <td style="text-align:center">${t.turnaround_time??'—'}</td>
+      <td style="text-align:center">${t.volume}</td>
+      <td style="color:var(--muted);font-size:.79rem;white-space:nowrap">${sd}</td>
+      <td style="color:var(--muted);font-size:.79rem;white-space:nowrap">${t.due_date||'—'}</td>
+      <td>${bdg(t.status)}</td>
+      <td>${bdg(t.priority)}</td>
+      <td style="white-space:nowrap;min-width:190px">
+        <button class="btn btn-outline btn-sm" onclick="viewTask(${t.id})" title="View details" style="padding:5px 9px;">👁</button>
+        ${canEdit ? `<button class="btn btn-outline btn-sm" onclick="editTask(${t.id})" style="color:var(--ink);font-weight:500;">✏️ Edit</button>` : ''}
+        ${canDel  ? `<button class="btn btn-danger  btn-sm" onclick="delTask(${t.id})"  style="font-weight:600;letter-spacing:.3px;">🗑 Delete</button>` : ''}
+      </td>
+    </tr>`;
+  }).join('');
+}
+
+/* ── Pills ── */
+const PLBL={study_id:'Study ID',sr_rfc:'SR/RFC',process:'Mapping Process',task_name:'Task',subtask:'Sub Task',
+  assignee:'Assignee',ent_id:'Ent. ID',tat:'TAT(min) ≤',vol:'Vol ≥',started:'Start Date',due:'Due',status:'Status',priority:'Priority'};
+const FMAP={study_id:'cf_study_id',sr_rfc:'cf_sr_rfc',process:'cf_process',task_name:'cf_task_name',
+  subtask:'cf_subtask',assignee:'cf_assignee',ent_id:'cf_ent_id',tat:'cf_tat',vol:'cf_vol',
+  started:'cf_started',due:'cf_due',status:'cf_status',priority:'cf_priority'};
+function renderPills(gs,f){
+  let h='';
+  if(gs)h+=mkPill('Search',gs,()=>{el('gSearch').value='';applyFilters();});
+  for(const[k,v]of Object.entries(f))if(v)h+=mkPill(PLBL[k]||k,v,()=>{if(FMAP[k])el(FMAP[k]).value='';applyFilters();});
+  el('activePills').innerHTML=h;
+}
+function mkPill(label,value,cb){
+  const key=`_pc_${label.replace(/\W/g,'_')}`;window[key]=cb;
+  return `<span class="pill"><b>${label}:</b>&nbsp;${value}<button class="pill-x" onclick="window['${key}']()">✕</button></span>`;
+}
+function clearAllFilters(){
+  el('gSearch').value='';
+  Object.values(FMAP).forEach(id=>{if(el(id))el(id).value='';});
+  applyFilters();
+}
+
+/* ── View detail ── */
+function viewTask(id){
+  const t=allTasks.find(x=>x.id===id);if(!t)return;
+  const sd=t.started_at?t.started_at.split(' ')[0]:'—';
+  el('mDetailBody').innerHTML=`
+    <div class="dg">
+      <div class="df"><label>Study ID</label><span class="mono">${escHtml(t.study_id)}</span></div>
+      <div class="df"><label>SR / RFC</label><span class="mono">${escHtml(t.sr_rfc)}</span></div>
+      <div class="df"><label>Project</label>${escHtml(t.project_name)} <span class="mono" style="color:var(--muted)">(${escHtml(t.project_code)})</span></div>
+      <div class="df"><label>Assignee</label>${escHtml(t.assignee_name)}${t.enterprise_id?` <span class="mono" style="color:var(--muted)">· ${escHtml(t.enterprise_id)}</span>`:''}</div>
+      <div class="df"><label>Status</label>${bdg(t.status)}</div>
+      <div class="df"><label>Priority</label>${bdg(t.priority)}</div>
+      <div class="df"><label>TAT (mins)</label>${t.turnaround_time||'—'}</div>
+      <div class="df"><label>Volume</label>${t.volume}</div>
+      <div class="df"><label>Start Date</label>${sd}</div>
+      <div class="df"><label>Due Date</label>${t.due_date||'—'}</div>
+      <div class="df"><label>Created</label>${t.created_at}</div>
+      ${t.completed_at?`<div class="df"><label>Completed</label>${t.completed_at}</div>`:''}
+    </div>
+    <div style="margin-bottom:11px"><label style="font-size:.67rem;color:var(--muted);text-transform:uppercase;letter-spacing:.8px;display:block;margin-bottom:3px">Task Name</label><strong>${escHtml(t.task_name)}</strong></div>
+    ${t.process?`<div style="margin-bottom:11px"><label style="font-size:.67rem;color:var(--muted);text-transform:uppercase;letter-spacing:.8px;display:block;margin-bottom:3px">Mapping Process</label>${escHtml(t.process)}</div>`:''}
+    ${t.subtask?`<div style="margin-bottom:11px"><label style="font-size:.67rem;color:var(--muted);text-transform:uppercase;letter-spacing:.8px;display:block;margin-bottom:3px">Sub Task</label>${escHtml(t.subtask)}</div>`:''}
+    ${t.notes?`<div style="margin-bottom:11px"><label style="font-size:.67rem;color:var(--muted);text-transform:uppercase;letter-spacing:.8px;display:block;margin-bottom:3px">Notes</label><span style="color:var(--muted)">${escHtml(t.notes)}</span></div>`:''}
+    <div class="ma">
+      <button class="btn btn-outline" onclick="closeModal('mDetail')">Close</button>
+      ${(CAN_SEE_ALL||(t.assigned_to===USER_ID||t.created_by_id===USER_ID))?`<button class="btn btn-gold" onclick="closeModal('mDetail');editTask(${t.id})">Edit Task</button>`:''}
+    </div>`;
+  openModal('mDetail');
+}
+
+/* ── New task ── */
+function openNewTask(){
+  el('eTaskId').value='';el('mTaskTitle').textContent='New Task';
+  el('studyIdRow').style.display='block';
+  el('tStudyId').style.display='';el('tStudyId').value='';
+  el('tStudyIdDisplay').style.display='none';
+  ['tSrRfc','tSubtask','tNotes','tStarted','tDue','tTAT'].forEach(id=>el(id).value='');
+  el('tProcess').value='';el('tAssignee').value='';
+  el('tPri').value='medium';el('tVol').value='1';el('tStat').value='pending';
+  buildTNDropdown('');resetCap();openModal('mTask');
+}
+
+/* ── Edit task ── */
+function editTask(id){
+  const t=allTasks.find(x=>x.id===id);if(!t)return;
+  el('eTaskId').value=id;el('mTaskTitle').textContent='Edit Task';
+  el('studyIdRow').style.display='block';
+  el('tStudyId').style.display='none';
+  el('tStudyIdDisplay').style.display='';el('tStudyIdDisplay').textContent=t.study_id;
+  el('tSrRfc').value=t.sr_rfc;
+  el('tSubtask').value=t.subtask||'';el('tAssignee').value=t.assigned_to?String(t.assigned_to):'';
+  el('tPri').value=t.priority;el('tTAT').value=t.turnaround_time||'';
+  el('tVol').value=t.volume;el('tStarted').value=t.started_at?t.started_at.split(' ')[0]:'';
+  el('tDue').value=t.due_date||'';el('tStat').value=t.status;el('tNotes').value=t.notes||'';
+  const matched=allTN.find(tn=>tn.task_name===t.task_name);
+  const proc=matched?matched.process:(t.process||'');
+  el('tProcess').value=proc;buildTNDropdown(proc);
+  el('tTaskName').value=t.task_name;onTNSelect();
+  openModal('mTask');
+}
+
+/* ── Save ── */
+async function saveTask(){
+  const editId=val('eTaskId');
+  const study_id=val('tStudyId').trim();
+  const sr_rfc=val('tSrRfc').trim();
+  const task_name=val('tTaskName').trim();
+  const process=val('tProcess').trim();
+  const assigned_to=val('tAssignee');
+  const tat=val('tTAT').trim();
+  const started=val('tStarted');
+  const due=val('tDue');
+
+  // Mandatory field validation
+  if(!editId&&!study_id){showToast('Study ID is required','error');return;}
+  if(!process){showToast('Mapping Process is required','error');return;}
+  if(!task_name){showToast('Task Name is required','error');return;}
+  if(!assigned_to){showToast('Assigned To is required','error');return;}
+  if(!tat){showToast('Turnaround Time is required','error');return;}
+  if(!started){showToast('Start Date is required','error');return;}
+  if(!due){showToast('Due Date is required','error');return;}
+
+  const subtask = val('tSubtask').trim();
+  if (subtask && /[^a-zA-Z0-9 ]/.test(subtask)) {
+    el('tSubtaskErr').style.display = 'block';
+    showToast('Sub Task: only letters, numbers and spaces allowed', 'error');
+    return;
+  }
+  el('tSubtaskErr').style.display = 'none';
+
+  // SR/RFC is optional — auto-generate if left blank
+  const final_sr_rfc = sr_rfc || `RFC-${Date.now().toString(36).toUpperCase()}`;
+
+  // Auto-assign to first available project
+  const project_id = allProjects.length ? allProjects[0].id : null;
+  if(!project_id){showToast('No projects found — please ask Admin to create one','error');return;}
+  const body={sr_rfc:final_sr_rfc,project_id,task_name,process,
+    subtask:subtask,assigned_to:assigned_to||null,
+    priority:val('tPri'),turnaround_time:parseInt(tat)||null,volume:parseInt(val('tVol'))||1,
+    started_at:started||null,due_date:due||null,
+    status:val('tStat'),notes:val('tNotes').trim()};
+  if(!editId) body.study_id=study_id;
+  try{
+    const res=await api(editId?`/api/tasks/${editId}`:'/api/tasks',editId?'PUT':'POST',body);
+    if(res.ok){showToast(editId?'Task updated ✓':'Task created ✓');closeModal('mTask');await Promise.all([loadTasks(),loadStats()]);}
+    else{const d=await res.json();showToast(d.error||'Save failed','error');}
+  }catch(e){showToast('Network error','error');}
+}
+
+/* ── Delete ── */
+async function delTask(id){
+  if(!confirm('Delete this task? This cannot be undone.'))return;
+  try{
+    const res=await api(`/api/tasks/${id}`,'DELETE');
+    if(res.ok){showToast('Task deleted');await Promise.all([loadTasks(),loadStats()]);}
+    else showToast('Delete failed','error');
+  }catch(e){showToast('Network error','error');}
+}
+
+/* ── Task Name helpers ── */
+function buildTNDropdown(proc){
+  const procLow=proc?proc.trim().toLowerCase():'';
+  const list=procLow?allTN.filter(t=>t.process.trim().toLowerCase()===procLow):allTN;
+  const cur=val('tTaskName');
+  const sel=el('tTaskName');
+  sel.innerHTML='';
+  const def=document.createElement('option');def.value='';def.textContent='— Select Task Name —';sel.appendChild(def);
+  list.forEach(t=>{
+    const opt=document.createElement('option');
+    opt.value=t.task_name;                          // raw value — no HTML encoding
+    opt.dataset.cap=t.cap_timing;
+    opt.dataset.proc=t.process;
+    opt.textContent=`${t.task_name}  (${t.process} · ⏱ ${t.cap_timing} mins)`;
+    if(t.task_name===cur)opt.selected=true;
+    sel.appendChild(opt);
+  });
+  if(cur)onTNSelect();
+}
+function filterTNByProcess(){buildTNDropdown(val('tProcess'));if(!val('tTaskName'))resetCap();}
+function onTNSelect(){
+  const opt=el('tTaskName').options[el('tTaskName').selectedIndex];const b=el('capBadge');
+  if(opt&&opt.dataset.cap){
+    const cap=+opt.dataset.cap;b.textContent=`⏱ ${cap} mins`;
+    const[bg,fg,bc]=cap<=30?['#dcfce7','#14532d','#86efac']:cap<=60?['#fefce8','#854d0e','#fde68a']:['#fee2e2','#991b1b','#fca5a5'];
+    Object.assign(b.style,{background:bg,color:fg,borderColor:bc});
+    if(!val('tProcess')&&opt.dataset.proc)el('tProcess').value=opt.dataset.proc;
+  }else resetCap();
+}
+function resetCap(){
+  const b=el('capBadge');b.textContent='—';
+  Object.assign(b.style,{background:'#f0f9ff',color:'#0369a1',borderColor:'#bae6fd'});
+}
+
+/* ── EXPORT ── */
+function exportExcel(){
+  if(!allTasks.length){showToast('No tasks to export','error');return;}
+  window.location.href='/api/tasks/export';
+  showToast(`Exporting ${allTasks.length} tasks…`);
+}
+
+/* ── TEMPLATE DOWNLOAD ── */
+function downloadTemplate(){
+  window.location.href='/api/tasks/template';
+  showToast('Template downloading…');
+}
+
+/* ── IMPORT ── */
+function setupDropZone(){
+  const dz=el('dropZone');
+  dz.addEventListener('dragover',e=>{e.preventDefault();dz.classList.add('drag');});
+  dz.addEventListener('dragleave',()=>dz.classList.remove('drag'));
+  dz.addEventListener('drop',e=>{e.preventDefault();dz.classList.remove('drag');const f=e.dataTransfer.files[0];if(f)handleFile(f);});
+}
+
+/* ── Import mode detection ──
+   'process' = task-names template (Mapping Process, Tasks/Task Name, Cap Timings)
+   'full'    = full tasks template  (SR/RFC, Project Code, Task Name, …)   */
+let importMode = 'full';
+
+function detectImportMode(headers){
+  const h = headers.map(x=>String(x).toLowerCase().replace(/[^a-z]/g,''));
+  const hasProcess  = h.some(x=>x==='process'||x==='mappingprocess');
+  const hasTasks    = h.some(x=>x==='tasks'||x==='taskname'||x==='task');
+  const hasCapTiming= h.some(x=>x.includes('captiming')||x.includes('timing'));
+  const hasSrRfc    = h.some(x=>x.includes('sr')||x.includes('rfc'));
+  // If it looks like a task-names sheet (process + tasks + no SR/RFC)
+  if(hasProcess && hasTasks && !hasSrRfc) return 'process';
+  return 'full';
+}
+
+async function handleFile(file){
+  if(!file)return;
+  el('fileInput').value='';
+  const dz=el('dropZone');
+  dz.innerHTML='<p style="font-size:1.5rem">⏳</p><p>Parsing file…</p>';
+  try{
+    const fd=new FormData();fd.append('file',file);
+    const r=await fetch('/api/tasks/parse-xlsx',{
+      method:'POST',
+      headers:{'X-CSRF-Token':document.querySelector('meta[name="csrf-token"]')?.content||''},
+      body:fd
+    });
+    const d=await r.json();
+    if(!r.ok){showToast(d.error||'Failed to parse file','error');resetDropZone();return;}
+    if(!d.rows||d.rows.length<1){showToast('File has no data rows','error');resetDropZone();return;}
+    impHeaderMap=d.headers.map(h=>String(h).trim().toLowerCase());
+    importRows=d.rows;
+    importMode=detectImportMode(d.headers);
+    // Show mode badge
+    const tag=el('impModeTag');
+    if(importMode==='process'){
+      tag.style.cssText='display:block;background:#e0f2fe;color:#0369a1;border:1px solid #7dd3fc;';
+      tag.textContent='✔ Task-Names format detected — tasks will be created by Mapping Process Name';
+    } else {
+      tag.style.cssText='display:block;background:#f0fdf4;color:#166534;border:1px solid #86efac;';
+      tag.textContent='✔ Full Tasks format detected — SR/RFC and Project Code required';
+    }
+    renderImportPreview(d.headers,d.rows);
+  }catch(err){
+    showToast('Upload error: '+err.message,'error');
+    resetDropZone();
+  }
+}
+
+function resetDropZone(){
+  const dz=el('dropZone');
+  if(dz)dz.innerHTML='<div style="font-size:2.2rem">📂</div><p>Click or drag &amp; drop your .xlsx file here</p>';
+}
+
+function renderImportPreview(header,rows){
+  el('impPreviewLabel').textContent=`${rows.length} row(s) found — review before importing`;
+  el('impTHead').innerHTML=header.map(h=>`<th style="padding:6px 8px;color:var(--muted);font-weight:600;white-space:nowrap">${escHtml(h)}</th>`).join('');
+  el('impTBody').innerHTML=rows.slice(0,10).map(r=>`<tr>${header.map((_,i)=>`<td style="padding:5px 8px;border-bottom:1px solid var(--border)">${escHtml(r[i]??'')}</td>`).join('')}</tr>`).join('');
+  if(rows.length>10)el('impTBody').innerHTML+=`<tr><td colspan="${header.length}" style="padding:6px 8px;color:var(--muted);text-align:center">… and ${rows.length-10} more rows</td></tr>`;
+  el('impResult').style.display='none';
+  el('impPreview').style.display='block';
+}
+
+async function confirmImport(){
+  if(!importRows.length)return;
+  const btn=el('bConfirmImport');btn.disabled=true;btn.textContent='⏳ Importing…';
+
+  let ok=0,fail=0,errs=[];
+  // Normalised header array used by both import paths
+  const hLow=impHeaderMap.map(h=>h.replace(/[^a-z]/g,''));
+
+  if(importMode==='process'){
+    /* ── Process-based import (task-names template) ── */
+    const iProc=hLow.findIndex(h=>h==='process'||h==='mappingprocess');
+    const iTask=hLow.findIndex(h=>h==='tasks'||h==='taskname'||h==='task');
+    const rows=importRows.map(r=>({
+      process: iProc>=0?String(r[iProc]||'').trim():'',
+      task_name: iTask>=0?String(r[iTask]||'').trim():'',
+    })).filter(r=>r.process||r.task_name);
+
+    try{
+      const res=await api('/api/tasks/bulk-from-process','POST',{rows});
+      const d=await res.json();
+      if(res.ok){ok=d.imported;fail=d.failed||0;errs=d.errors||[];}
+      else{fail=rows.length;errs=[d.error||'Import failed'];}
+    }catch(e){fail=importRows.length;errs=['Network error'];}
+
+  } else {
+    /* ── Full tasks template import ── */
+    const col=name=>impHeaderMap.findIndex(h=>h.replace(/[^a-z]/g,'').includes(name.replace(/[^a-z]/g,'')));
+    const iSrRfc=col('srrfc');const iProjCode=col('projectcode');const iProcess=hLow.findIndex(h=>h.replace(/[^a-z]/g,'').includes('process'));
+    const iTaskName=col('taskname');const iSubtask=col('subtask');const iAssignee=col('assignee');
+    const iTAT=col('tat');const iVol=col('volume');const iStart=col('startdate');
+    const iDue=col('duedate');const iStatus=col('status');const iPriority=col('priority');const iNotes=col('notes');
+
+    for(const row of importRows){
+      const g=i=>i>=0?String(row[i]||'').trim():'';
+      const sr_rfc=g(iSrRfc),projCode=g(iProjCode),task_name=g(iTaskName);
+      if(!sr_rfc||!task_name){fail++;errs.push('Row skipped — missing SR/RFC or Task Name');continue;}
+      const proj=allProjects.find(p=>p.project_code.toLowerCase()===projCode.toLowerCase()||p.name.toLowerCase()===projCode.toLowerCase());
+      if(!proj){fail++;errs.push(`"${sr_rfc}" — project "${projCode}" not found`);continue;}
+      const assigneeStr=g(iAssignee);
+      const userObj=allUsers.find(u=>u.username.toLowerCase()===assigneeStr.toLowerCase()||u.enterprise_id.toLowerCase()===assigneeStr.toLowerCase());
+      const body={sr_rfc,project_id:proj.id,task_name,process:g(iProcess),subtask:g(iSubtask),
+        assigned_to:userObj?userObj.id:null,turnaround_time:g(iTAT)||null,volume:parseInt(g(iVol))||1,
+        started_at:g(iStart)||null,due_date:g(iDue)||null,
+        status:g(iStatus)||'pending',priority:g(iPriority)||'medium',notes:g(iNotes)};
+      try{
+        const res=await api('/api/tasks','POST',body);
+        if(res.ok)ok++;
+        else{const d=await res.json();fail++;errs.push(`"${sr_rfc}": ${d.error||'error'}`);}
+      }catch{fail++;errs.push(`"${sr_rfc}": network error`);}
+    }
+  }
+
+  const resEl=el('impResult');
+  resEl.style.display='block';
+  if(fail===0){
+    Object.assign(resEl.style,{background:'#dcfce7',color:'#14532d',border:'1px solid #86efac'});
+    resEl.textContent=`✅ All ${ok} tasks imported successfully!`;
+  }else if(ok>0){
+    Object.assign(resEl.style,{background:'#fef9c3',color:'#854d0e',border:'1px solid #fde68a'});
+    resEl.innerHTML=`⚠️ ${ok} imported, ${fail} failed.<br><small>${errs.slice(0,5).map(escHtml).join('<br>')}</small>`;
+  }else{
+    Object.assign(resEl.style,{background:'#fee2e2',color:'#991b1b',border:'1px solid #fca5a5'});
+    resEl.innerHTML=`❌ Import failed (${fail} rows).<br><small>${errs.slice(0,5).map(escHtml).join('<br>')}</small>`;
+  }
+
+  btn.disabled=false;btn.textContent='✓ Import All Rows';
+  if(ok>0){
+    await Promise.all([loadTasks(), loadStats()]);
+  }
+}
+
+function resetImport(){
+  importRows=[];impHeaderMap=[];importMode='full';
+  el('impPreview').style.display='none';
+  el('impResult').style.display='none';
+  el('impModeTag').style.display='none';
+  el('fileInput').value='';
+  resetDropZone();
+}
+
+/* Modal click-outside: only close if BOTH mousedown AND click land on the backdrop.
+   Without this, clicking "New Task" button opens the modal then the same click event
+   bubbles to the overlay and immediately closes it. */
+let _mdTarget = null;
+document.addEventListener('mousedown', e => { _mdTarget = e.target; });
+document.querySelectorAll('.overlay').forEach(ov => {
+  ov.addEventListener('click', e => {
+    // Close only when mousedown also started on the overlay backdrop itself
+    if (e.target === ov && _mdTarget === ov) {
+      ov.classList.remove('open');
+      if (ov.id === 'mImport') resetImport();
+    }
+  });
+});
+
+/* Live clock */
+(function(){
+  function tick(){
+    const now=new Date();
+    const h=now.getHours(),m=now.getMinutes(),s=now.getSeconds();
+    const ampm=h>=12?'PM':'AM',h12=h%12||12;
+    const pad=n=>String(n).padStart(2,'0');
+    const days=['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+    const months=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    const te=document.getElementById('tcTime');
+    const de=document.getElementById('tcDate');
+    if(te)te.textContent=`${pad(h12)}:${pad(m)}:${pad(s)} ${ampm}`;
+    if(de)de.textContent=`${days[now.getDay()]}, ${months[now.getMonth()]} ${now.getDate()}, ${now.getFullYear()}`;
+  }
+  tick();setInterval(tick,1000);
+})();
+init();
+</script>
+</body>
+</html>

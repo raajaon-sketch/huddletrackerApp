@@ -1,0 +1,1234 @@
+from flask import Flask, render_template, request, jsonify, redirect, url_for, send_file, session
+from flask_sqlalchemy import SQLAlchemy
+from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
+from werkzeug.security import generate_password_hash, check_password_hash
+from datetime import datetime, timedelta
+import uuid, os, re, io, secrets
+
+# ── App Config ─────────────────────────────────────────────────────────────────
+
+app = Flask(__name__)
+
+# BUG-01 FIX: SECRET_KEY now loaded from environment variable; never hardcoded.
+# Generate a secure fallback for development only — always set SECRET_KEY in
+# your environment before deploying.
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY') or secrets.token_hex(32)
+
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///' + os.path.join(
+    os.path.abspath(os.path.dirname(__file__)), 'huddle_tracker.db')
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+app.config['SESSION_COOKIE_HTTPONLY'] = True
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+
+# BUG-03 FIX: Enable SESSION_COOKIE_SECURE in production (HTTPS).
+# In development it remains False so localhost works without TLS.
+app.config['SESSION_COOKIE_SECURE'] = os.environ.get('FLASK_ENV') == 'production'
+
+app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(hours=8)
+
+# BUG-08 FIX: Debug mode is now controlled purely by the environment variable.
+# Never enable debug in production. Set FLASK_DEBUG=0 (or omit it) to disable.
+app.config['DEBUG'] = os.environ.get('FLASK_DEBUG', '0') == '1'
+
+db = SQLAlchemy(app)
+login_manager = LoginManager(app)
+login_manager.login_view = 'login'
+
+# ── CSRF Protection ────────────────────────────────────────────────────────────
+# BUG-02 FIX: Generate a per-session CSRF token and validate it on all
+# state-changing API calls (POST / PUT / DELETE).
+
+def get_csrf_token():
+    """Return the session CSRF token, creating one if it does not yet exist."""
+    if '_csrf_token' not in session:
+        session['_csrf_token'] = secrets.token_hex(32)
+    return session['_csrf_token']
+
+app.jinja_env.globals['csrf_token'] = get_csrf_token
+
+def _is_safe_method():
+    return request.method in ('GET', 'HEAD', 'OPTIONS')
+
+@app.before_request
+def csrf_protect():
+    """Validate CSRF token for all mutating API requests."""
+    if _is_safe_method():
+        return
+    # Only enforce on authenticated JSON API routes (not the login form itself)
+    if request.path == '/login':
+        return
+    if not request.path.startswith('/api/') and request.path not in ('/logout',):
+        return
+    if not current_user.is_authenticated:
+        return
+    token = (request.get_json(silent=True) or {}).get('_csrf') \
+            or request.headers.get('X-CSRF-Token') \
+            or request.form.get('_csrf_token')
+    if not token or token != session.get('_csrf_token'):
+        return jsonify({'error': 'CSRF token invalid or missing'}), 403
+
+# ── Rate Limiting ──────────────────────────────────────────────────────────────
+
+try:
+    from flask_limiter import Limiter
+    from flask_limiter.util import get_remote_address
+    limiter = Limiter(get_remote_address, app=app,
+                      default_limits=['1000 per hour'], storage_uri='memory://')
+    _login_limit = limiter.limit('20 per minute')
+except Exception:
+    # Graceful degradation: run without rate limiting if flask-limiter not installed.
+    limiter = None
+    _login_limit = lambda f: f  # no-op decorator
+
+
+# ── Models ─────────────────────────────────────────────────────────────────────
+
+class User(UserMixin, db.Model):
+    __tablename__ = 'users'
+    id            = db.Column(db.Integer, primary_key=True)
+    username      = db.Column(db.String(80), unique=True, nullable=False)
+    email         = db.Column(db.String(120), unique=True, nullable=False)
+    password_hash = db.Column(db.String(256), nullable=False)
+    enterprise_id = db.Column(db.String(50), unique=True, nullable=False)
+    role          = db.Column(db.String(20), default='member')
+    is_active     = db.Column(db.Boolean, default=True)
+    created_at    = db.Column(db.DateTime, default=datetime.utcnow)
+    projects      = db.relationship('Project', backref='owner', lazy='dynamic',
+                                    foreign_keys='Project.owner_id')
+    assigned_tasks = db.relationship('Task', backref='assignee', lazy='dynamic',
+                                     foreign_keys='Task.assigned_to')
+
+    def set_password(self, pw):
+        self.password_hash = generate_password_hash(pw)
+
+    def check_password(self, pw):
+        return check_password_hash(self.password_hash, pw)
+
+    def to_dict(self):
+        return {
+            'id': self.id, 'username': self.username, 'email': self.email,
+            'enterprise_id': self.enterprise_id, 'role': self.role,
+            'is_active': self.is_active,
+        }
+
+
+class Project(db.Model):
+    __tablename__ = 'projects'
+    id           = db.Column(db.Integer, primary_key=True)
+    project_code = db.Column(db.String(20), unique=True, nullable=False)
+    name         = db.Column(db.String(200), nullable=False)
+    description  = db.Column(db.Text, default='')
+    owner_id     = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    status       = db.Column(db.String(20), default='active')
+    created_at   = db.Column(db.DateTime, default=datetime.utcnow)
+    deadline     = db.Column(db.DateTime, nullable=True)
+    tasks        = db.relationship('Task', backref='project', lazy='dynamic',
+                                   cascade='all, delete-orphan')
+
+    def to_dict(self):
+        return {
+            'id': self.id, 'project_code': self.project_code, 'name': self.name,
+            'description': self.description or '', 'status': self.status,
+            'owner': self.owner.username if self.owner else '',
+            'created_at': self.created_at.strftime('%Y-%m-%d %H:%M') if self.created_at else '',
+            'deadline': self.deadline.strftime('%Y-%m-%d') if self.deadline else None,
+            'task_count': self.tasks.count(),
+        }
+
+
+class Task(db.Model):
+    __tablename__ = 'tasks'
+    id              = db.Column(db.Integer, primary_key=True)
+    study_id        = db.Column(db.String(50), unique=True, nullable=False)
+    sr_rfc          = db.Column(db.String(100), nullable=False)
+    project_id      = db.Column(db.Integer, db.ForeignKey('projects.id'), nullable=False)
+    assigned_to     = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    task_name       = db.Column(db.String(300), nullable=False)
+    process         = db.Column(db.String(200), default='')
+    subtask         = db.Column(db.String(300), default='')
+    status          = db.Column(db.String(30), default='pending')
+    priority        = db.Column(db.String(10), default='medium')
+    volume          = db.Column(db.Integer, default=1)
+    turnaround_time = db.Column(db.Integer, nullable=True)
+    due_date        = db.Column(db.DateTime, nullable=True)
+    started_at      = db.Column(db.DateTime, nullable=True)
+    completed_at    = db.Column(db.DateTime, nullable=True)
+    created_at      = db.Column(db.DateTime, default=datetime.utcnow)
+    notes           = db.Column(db.Text, default='')
+    created_by      = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+
+    # Eager-load creator to avoid N+1 queries on to_dict()
+    creator  = db.relationship('User', foreign_keys=[created_by])
+
+    # BUG-04 FIX: Use a dedicated relationship for the assignee so to_dict()
+    # uses the already-loaded object instead of firing a separate query per row.
+    _assignee = db.relationship('User', foreign_keys=[assigned_to],
+                                overlaps='assignee,assigned_tasks')
+
+    def to_dict(self):
+        assignee = self._assignee
+        creator  = self.creator
+        return {
+            'id': self.id, 'study_id': self.study_id, 'sr_rfc': self.sr_rfc,
+            'project_id': self.project_id,
+            'project_code': self.project.project_code if self.project else '',
+            'project_name': self.project.name if self.project else '',
+            'assigned_to': self.assigned_to,
+            'assignee_name': assignee.username if assignee else 'Unassigned',
+            'enterprise_id': assignee.enterprise_id if assignee else '',
+            'task_name': self.task_name, 'process': self.process or '',
+            'subtask': self.subtask or '',
+            'status': self.status, 'priority': self.priority,
+            'volume': self.volume, 'turnaround_time': self.turnaround_time,
+            'due_date': self.due_date.strftime('%Y-%m-%d') if self.due_date else None,
+            'started_at': self.started_at.strftime('%Y-%m-%d %H:%M') if self.started_at else None,
+            'completed_at': self.completed_at.strftime('%Y-%m-%d %H:%M') if self.completed_at else None,
+            'created_at': self.created_at.strftime('%Y-%m-%d %H:%M') if self.created_at else '',
+            'notes': self.notes or '',
+            'created_by': creator.username if creator else '',
+        }
+
+
+class TaskName(db.Model):
+    __tablename__ = 'task_names'
+    id         = db.Column(db.Integer, primary_key=True)
+    process    = db.Column(db.String(200), nullable=False, index=True)
+    task_name  = db.Column(db.String(300), nullable=False)
+    cap_timing = db.Column(db.Integer, nullable=False)
+    status     = db.Column(db.String(20), default='active')
+    created_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    def to_dict(self):
+        return {
+            'id': self.id, 'process': self.process, 'task_name': self.task_name,
+            'cap_timing': self.cap_timing, 'status': self.status,
+            'created_at': self.created_at.strftime('%Y-%m-%d') if self.created_at else '',
+        }
+
+
+
+class Process(db.Model):
+    __tablename__ = 'processes'
+    id         = db.Column(db.Integer, primary_key=True)
+    name       = db.Column(db.String(200), unique=True, nullable=False)
+    created_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    def to_dict(self):
+        return {
+            'id': self.id, 'name': self.name,
+            'created_at': self.created_at.strftime('%Y-%m-%d') if self.created_at else '',
+        }
+
+
+# BUG-06 FIX: Use db.session.get() — User.query.get() is deprecated in SQLAlchemy 2.x
+@login_manager.user_loader
+def load_user(uid):
+    return db.session.get(User, int(uid))
+
+
+# ── Helpers ────────────────────────────────────────────────────────────────────
+
+def gen_study_id():
+    return 'STD-{}-{}'.format(datetime.utcnow().strftime('%Y%m'), uuid.uuid4().hex[:6].upper())
+
+def gen_project_code():
+    return 'PRJ-{}'.format(uuid.uuid4().hex[:8].upper())
+
+def sanitize(text):
+    return re.sub(r'[<>"\']', '', str(text)).strip() if text else ''
+
+
+# ── Auth ───────────────────────────────────────────────────────────────────────
+
+@app.route('/')
+def index():
+    if current_user.is_authenticated:
+        return redirect(url_for('portal_select'))
+    return redirect(url_for('login'))
+
+
+@app.route('/portal')
+@login_required
+def portal_select():
+    return render_template('portal_select.html', user=current_user)
+
+
+@app.route('/admin')
+@login_required
+def admin_portal():
+    if current_user.role not in ('admin', 'lead'):
+        return redirect(url_for('huddle_portal'))
+    return render_template('admin_portal.html', user=current_user)
+
+
+@app.route('/huddle')
+@login_required
+def huddle_portal():
+    return render_template('huddle_portal.html', user=current_user)
+
+
+@app.route('/login', methods=['GET', 'POST'])
+@_login_limit  # stricter rate limit on login attempts
+def login():
+    if request.method == 'POST':
+        try:
+            data = request.get_json(silent=True) or request.form
+            user = User.query.filter_by(username=sanitize(data.get('username', ''))).first()
+            if user and user.check_password(data.get('password', '')) and user.is_active:
+                login_user(user, remember=False)
+                # Rotate CSRF token on login to bind it to the authenticated session
+                session['_csrf_token'] = secrets.token_hex(32)
+                return jsonify({'success': True, 'role': user.role,
+                                'csrf_token': session['_csrf_token']})
+            return jsonify({'success': False, 'message': 'Invalid credentials'}), 401
+        except Exception as e:
+            return jsonify({'success': False, 'message': str(e)}), 500
+    return render_template('login.html')
+
+
+@app.route('/logout')
+@login_required
+def logout():
+    session.clear()   # Wipe session including CSRF token
+    logout_user()
+    return redirect(url_for('login'))
+
+
+@app.route('/dashboard')
+@login_required
+def dashboard():
+    return render_template('dashboard.html', user=current_user)
+
+
+# ── Projects API ───────────────────────────────────────────────────────────────
+
+@app.route('/api/projects', methods=['GET'])
+@login_required
+def get_projects():
+    try:
+        q = Project.query
+        if current_user.role == 'member':
+            ids = db.session.query(Task.project_id).filter_by(assigned_to=current_user.id).distinct()
+            q = q.filter(db.or_(Project.owner_id == current_user.id, Project.id.in_(ids)))
+        return jsonify([p.to_dict() for p in q.order_by(Project.created_at.desc()).all()])
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/projects', methods=['POST'])
+@login_required
+def create_project():
+    try:
+        data = request.get_json(silent=True) or {}
+        if not data.get('name'):
+            return jsonify({'error': 'Project name required'}), 400
+        deadline = None
+        if data.get('deadline'):
+            try:
+                deadline = datetime.strptime(data['deadline'], '%Y-%m-%d')
+            except ValueError:
+                pass
+        p = Project(
+            project_code=gen_project_code(),
+            name=sanitize(data['name'])[:200],
+            description=sanitize(data.get('description', ''))[:1000],
+            owner_id=current_user.id,
+            deadline=deadline,
+        )
+        db.session.add(p)
+        db.session.commit()
+        return jsonify(p.to_dict()), 201
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/projects/<int:pid>', methods=['PUT'])
+@login_required
+def update_project(pid):
+    try:
+        p = db.session.get(Project, pid)  # BUG-06 FIX
+        if p is None:
+            return jsonify({'error': 'Project not found'}), 404
+        if p.owner_id != current_user.id and current_user.role not in ('admin', 'lead'):
+            return jsonify({'error': 'Unauthorized'}), 403
+        data = request.get_json(silent=True) or {}
+        if 'name' in data:
+            p.name = sanitize(data['name'])[:200]
+        if 'description' in data:
+            p.description = sanitize(data['description'])[:1000]
+        if 'status' in data and data['status'] in ('active', 'completed', 'archived'):
+            p.status = data['status']
+        if data.get('deadline'):
+            try:
+                p.deadline = datetime.strptime(data['deadline'], '%Y-%m-%d')
+            except ValueError:
+                pass
+        db.session.commit()
+        return jsonify(p.to_dict())
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/projects/<int:pid>', methods=['DELETE'])
+@login_required
+def delete_project(pid):
+    try:
+        p = db.session.get(Project, pid)  # BUG-06 FIX
+        if p is None:
+            return jsonify({'error': 'Project not found'}), 404
+        if p.owner_id != current_user.id and current_user.role != 'admin':
+            return jsonify({'error': 'Unauthorized'}), 403
+        db.session.delete(p)
+        db.session.commit()
+        return jsonify({'success': True})
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
+
+
+# ── Tasks API ──────────────────────────────────────────────────────────────────
+
+@app.route('/api/tasks', methods=['GET'])
+@login_required
+def get_tasks():
+    try:
+        # BUG-04 FIX: Eager-load all related objects to eliminate N+1 queries.
+        from sqlalchemy.orm import joinedload
+        q = Task.query.options(
+            joinedload(Task._assignee),
+            joinedload(Task.creator),
+            joinedload(Task.project),
+        )
+        if current_user.role == 'member':
+            q = q.filter(db.or_(
+                Task.assigned_to == current_user.id,
+                Task.created_by  == current_user.id,
+            ))
+        if request.args.get('project_id'):
+            q = q.filter(Task.project_id == int(request.args['project_id']))
+        if request.args.get('status'):
+            q = q.filter(Task.status == request.args['status'])
+        if request.args.get('priority'):
+            q = q.filter(Task.priority == request.args['priority'])
+        if request.args.get('search'):
+            s = '%{}%'.format(request.args['search'])
+            q = q.filter(db.or_(
+                Task.study_id.ilike(s),
+                Task.sr_rfc.ilike(s),
+                Task.task_name.ilike(s),
+            ))
+        return jsonify([t.to_dict() for t in q.order_by(Task.created_at.desc()).limit(500).all()])
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/tasks', methods=['POST'])
+@login_required
+def create_task():
+    try:
+        data = request.get_json(silent=True) or {}
+        for f in ('project_id', 'task_name', 'sr_rfc'):
+            if not data.get(f):
+                return jsonify({'error': f'{f} is required'}), 400
+        if db.session.get(Project, int(data['project_id'])) is None:  # BUG-06 FIX
+            return jsonify({'error': 'Project not found'}), 404
+        due = None
+        if data.get('due_date'):
+            try:
+                due = datetime.strptime(data['due_date'], '%Y-%m-%d')
+            except ValueError:
+                pass
+        t = Task(
+            study_id=gen_study_id(),
+            sr_rfc=sanitize(data['sr_rfc'])[:100],
+            project_id=int(data['project_id']),
+            assigned_to=int(data['assigned_to']) if data.get('assigned_to') else None,
+            task_name=sanitize(data['task_name'])[:300],
+            process=sanitize(data.get('process', ''))[:200],
+            subtask=sanitize(data.get('subtask', ''))[:300],
+            status=data.get('status', 'pending'),
+            priority=data.get('priority', 'medium'),
+            volume=max(1, int(data.get('volume', 1))),
+            turnaround_time=int(data['turnaround_time']) if data.get('turnaround_time') else None,
+            due_date=due,
+            notes=sanitize(data.get('notes', ''))[:2000],
+            created_by=current_user.id,
+        )
+        # FIX-12: honour started_at from bulk import / API consumers
+        if data.get('started_at'):
+            for fmt in ('%Y-%m-%d %H:%M', '%Y-%m-%d'):
+                try:
+                    t.started_at = datetime.strptime(data['started_at'], fmt)
+                    break
+                except ValueError:
+                    continue
+        db.session.add(t)
+        db.session.commit()
+        return jsonify(t.to_dict()), 201
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/tasks/<int:tid>', methods=['PUT'])
+@login_required
+def update_task(tid):
+    try:
+        task = db.session.get(Task, tid)  # BUG-06 FIX
+        if task is None:
+            return jsonify({'error': 'Task not found'}), 404
+        if (task.created_by != current_user.id
+                and task.assigned_to != current_user.id
+                and current_user.role not in ('admin', 'lead')):
+            return jsonify({'error': 'Unauthorized'}), 403
+        data = request.get_json(silent=True) or {}
+        for f in ['task_name', 'process', 'subtask', 'notes', 'sr_rfc', 'status', 'priority']:
+            if f in data:
+                setattr(task, f, sanitize(data[f]))
+        for f in ['volume', 'turnaround_time']:
+            if f in data and data[f] is not None:
+                setattr(task, f, int(data[f]))
+        if 'assigned_to' in data:
+            task.assigned_to = int(data['assigned_to']) if data['assigned_to'] else None
+        if 'due_date' in data:
+            if data['due_date']:
+                try:
+                    task.due_date = datetime.strptime(data['due_date'], '%Y-%m-%d')
+                except ValueError:
+                    pass
+            else:
+                task.due_date = None  # FIX-11: allow clearing the due date
+        if 'started_at' in data:
+            if data['started_at']:
+                # BUG-FIX: Accept both '%Y-%m-%d %H:%M' (from to_dict) and
+                # '%Y-%m-%d' (date-only input from the UI) so the field round-trips
+                # correctly without silently discarding the value on re-submission.
+                for fmt in ('%Y-%m-%d %H:%M', '%Y-%m-%d'):
+                    try:
+                        task.started_at = datetime.strptime(data['started_at'], fmt)
+                        break
+                    except ValueError:
+                        continue
+            else:
+                task.started_at = None
+        elif data.get('status') == 'in_progress' and not task.started_at:
+            task.started_at = datetime.utcnow()
+        if data.get('status') == 'done' and not task.completed_at:
+            task.completed_at = datetime.utcnow()
+        db.session.commit()
+        return jsonify(task.to_dict())
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/tasks/<int:tid>', methods=['DELETE'])
+@login_required
+def delete_task(tid):
+    try:
+        task = db.session.get(Task, tid)  # BUG-06 FIX
+        if task is None:
+            return jsonify({'error': 'Task not found'}), 404
+        if task.created_by != current_user.id and current_user.role != 'admin':
+            return jsonify({'error': 'Unauthorized'}), 403
+        db.session.delete(task)
+        db.session.commit()
+        return jsonify({'success': True})
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
+
+
+# ── Tasks Export / Template / Import-Parse ─────────────────────────────────────
+
+@app.route('/api/tasks/export', methods=['GET'])
+@login_required
+def export_tasks():
+    """Server-side task export — returns xlsx, no CDN dependency needed."""
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+        from openpyxl.utils import get_column_letter
+        from sqlalchemy.orm import joinedload
+
+        q = Task.query.options(
+            joinedload(Task._assignee),
+            joinedload(Task.project),
+        )
+        if current_user.role == 'member':
+            q = q.filter(db.or_(
+                Task.assigned_to == current_user.id,
+                Task.created_by  == current_user.id,
+            ))
+        tasks = q.order_by(Task.created_at.desc()).limit(500).all()
+
+        wb = Workbook()
+        ws = wb.active
+        ws.title = 'Tasks'
+
+        thin   = Side(style='thin', color='DDDDDD')
+        border = Border(left=thin, right=thin, top=thin, bottom=thin)
+        headers = ['Study ID','SR/RFC','Process','Task Name','Sub Task','Assignee',
+                   'Enterprise ID','TAT (hrs)','Volume','Start Date','Due Date',
+                   'Status','Priority','Notes']
+        col_widths = [14,14,20,30,24,16,14,9,8,13,13,13,11,30]
+
+        for ci, (h, w) in enumerate(zip(headers, col_widths), 1):
+            c = ws.cell(row=1, column=ci, value=h)
+            c.font      = Font(name='Arial', bold=True, color='FFFFFF', size=10)
+            c.fill      = PatternFill('solid', start_color='0A0A0F')
+            c.alignment = Alignment(horizontal='center', vertical='center')
+            c.border    = border
+            ws.column_dimensions[get_column_letter(ci)].width = w
+        ws.row_dimensions[1].height = 24
+
+        alt = PatternFill('solid', start_color='F8F7F4')
+        for ri, t in enumerate(tasks, 2):
+            td = t.to_dict()
+            vals = [
+                td.get('study_id',''), td.get('sr_rfc',''), td.get('process',''),
+                td.get('task_name',''), td.get('subtask',''), td.get('assignee_name',''),
+                td.get('enterprise_id',''), td.get('turnaround_time',''), td.get('volume',''),
+                td.get('started_at','').split(' ')[0] if td.get('started_at') else '',
+                td.get('due_date',''), td.get('status',''), td.get('priority',''),
+                td.get('notes',''),
+            ]
+            for ci, val in enumerate(vals, 1):
+                c = ws.cell(row=ri, column=ci, value=val)
+                c.font      = Font(name='Arial', size=9)
+                c.alignment = Alignment(vertical='center')
+                c.border    = border
+                if ri % 2 == 0:
+                    c.fill = alt
+
+        buf = io.BytesIO()
+        wb.save(buf)
+        buf.seek(0)
+        fname = f"HuddleTasks_{datetime.utcnow().strftime('%Y-%m-%d')}.xlsx"
+        return send_file(buf,
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            as_attachment=True, download_name=fname)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/tasks/template', methods=['GET'])
+@login_required
+def download_tasks_template():
+    """Server-side task import template download."""
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+        from openpyxl.utils import get_column_letter
+
+        # Fetch one project and one task-name to use as example values
+        proj  = Project.query.first()
+        tn    = TaskName.query.first()
+
+        wb = Workbook()
+        ws = wb.active
+        ws.title = 'Tasks Import Template'
+
+        thin   = Side(style='thin', color='CCCCCC')
+        border = Border(left=thin, right=thin, top=thin, bottom=thin)
+        headers = ['SR/RFC *','Project Code *','Process','Task Name *','Sub Task',
+                   'Assignee Username','TAT (hrs)','Volume',
+                   'Start Date (YYYY-MM-DD)','Due Date (YYYY-MM-DD)',
+                   'Status','Priority','Notes']
+        col_widths = [16,16,20,30,24,18,9,8,22,22,12,12,30]
+
+        for ci, (h, w) in enumerate(zip(headers, col_widths), 1):
+            c = ws.cell(row=1, column=ci, value=h)
+            c.font      = Font(name='Arial', bold=True, color='FFFFFF', size=10)
+            c.fill      = PatternFill('solid', start_color='0A0A0F')
+            c.alignment = Alignment(horizontal='center', vertical='center')
+            c.border    = border
+            ws.column_dimensions[get_column_letter(ci)].width = w
+        ws.row_dimensions[1].height = 26
+
+        example = [
+            'RFC-2024-001',
+            proj.project_code if proj else 'PROJ-001',
+            tn.process if tn else 'NG 1.0',
+            tn.task_name if tn else 'Sample Task',
+            '', '', 8, 1, '', '', 'pending', 'medium', ''
+        ]
+        for ci, val in enumerate(example, 1):
+            c = ws.cell(row=2, column=ci, value=val)
+            c.font      = Font(name='Arial', size=9)
+            c.alignment = Alignment(vertical='center')
+            c.border    = border
+
+        buf = io.BytesIO()
+        wb.save(buf)
+        buf.seek(0)
+        return send_file(buf,
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            as_attachment=True, download_name='HuddleTasksImportTemplate.xlsx')
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/tasks/parse-xlsx', methods=['POST'])
+@login_required
+def parse_tasks_xlsx():
+    """Server-side xlsx parsing for task import — returns raw rows as JSON."""
+    try:
+        if 'file' not in request.files:
+            return jsonify({'error': 'No file uploaded'}), 400
+        f = request.files['file']
+        if not f.filename or not f.filename.lower().endswith('.xlsx'):
+            return jsonify({'error': 'Please upload a .xlsx file'}), 400
+        from openpyxl import load_workbook
+        wb = load_workbook(f.stream, read_only=True, data_only=True)
+        ws = wb.active
+        rows_iter = ws.iter_rows(values_only=True)
+        try:
+            raw_headers = list(next(rows_iter))
+        except StopIteration:
+            return jsonify({'error': 'File is empty'}), 400
+        headers = [str(h).strip() if h is not None else '' for h in raw_headers]
+        data_rows = []
+        for row in rows_iter:
+            cells = [str(c).strip() if c is not None else '' for c in row]
+            if any(cells):  # skip fully empty rows
+                data_rows.append(cells)
+        wb.close()
+        return jsonify({'headers': headers, 'rows': data_rows}), 200
+    except Exception as e:
+        return jsonify({'error': f'Failed to parse file: {str(e)}'}), 500
+
+
+# ── Users API ──────────────────────────────────────────────────────────────────
+
+@app.route('/api/users', methods=['GET'])
+@login_required
+def get_users():
+    try:
+        return jsonify([u.to_dict() for u in User.query.filter_by(is_active=True).all()])
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/users', methods=['POST'])
+@login_required
+def create_user():
+    try:
+        if current_user.role != 'admin':
+            return jsonify({'error': 'Unauthorized'}), 403
+        data = request.get_json(silent=True) or {}
+        if User.query.filter_by(username=data.get('username')).first():
+            return jsonify({'error': 'Username already exists'}), 409
+        # FIX-10: Basic email format validation
+        email_val = data.get('email', '')
+        if not re.match(r'^[^@\s]+@[^@\s]+\.[^@\s]+$', email_val):
+            return jsonify({'error': 'Invalid email format'}), 400
+        if User.query.filter_by(email=email_val).first():
+            return jsonify({'error': 'Email already registered'}), 409
+        u = User(
+            username=sanitize(data['username'])[:80],
+            email=sanitize(data['email'])[:120],
+            enterprise_id=sanitize(data['enterprise_id'])[:50],
+            role=data.get('role', 'member'),
+        )
+        u.set_password(data['password'])
+        db.session.add(u)
+        db.session.commit()
+        return jsonify(u.to_dict()), 201
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
+
+
+# ── Analytics API ──────────────────────────────────────────────────────────────
+
+@app.route('/api/analytics', methods=['GET'])
+@login_required
+def analytics():
+    try:
+        # BUG-05 FIX: Scope analytics to the requesting user's tasks for members.
+        # Admins and leads continue to see org-wide figures.
+        if current_user.role == 'member':
+            base = Task.query.filter(db.or_(
+                Task.assigned_to == current_user.id,
+                Task.created_by  == current_user.id,
+            ))
+            projs = db.session.query(Task.project_id).filter(
+                db.or_(Task.assigned_to == current_user.id,
+                       Task.created_by  == current_user.id)
+            ).distinct().count()
+            # Scoped volume: only this user's tasks
+            vol = db.session.query(db.func.sum(Task.volume)).filter(
+                db.or_(Task.assigned_to == current_user.id,
+                       Task.created_by  == current_user.id)
+            ).scalar() or 0
+        else:
+            base  = Task.query
+            projs = Project.query.count()
+            vol   = db.session.query(db.func.sum(Task.volume)).scalar() or 0
+
+        # BUG-FIX: Use filter(Task.col == val) instead of filter_by() chained on
+        # the same `base` variable. filter_by() mutates / chains the existing query
+        # object in SQLAlchemy, so repeated calls accumulate extra WHERE clauses and
+        # produce incorrect counts (e.g. done count bleeds into pending count).
+        total = base.count()
+        done  = base.filter(Task.status == 'done').count()
+        pend  = base.filter(Task.status == 'pending').count()
+        inp   = base.filter(Task.status == 'in_progress').count()
+        blk   = base.filter(Task.status == 'blocked').count()
+        comp  = base.filter(
+            Task.started_at.isnot(None),
+            Task.completed_at.isnot(None),
+        ).all()
+        avg = (
+            round(sum((t.completed_at - t.started_at).total_seconds() / 3600
+                      for t in comp) / len(comp), 1)
+            if comp else 0
+        )
+        pdata = {p: base.filter(Task.priority == p).count()
+                 for p in ('low', 'medium', 'high', 'critical')}
+
+        # Total active users (admin dashboard "Team Members" stat card)
+        total_users = User.query.filter_by(is_active=True).count()
+
+        return jsonify({
+            'total_tasks': total, 'done_tasks': done, 'pending_tasks': pend,
+            'in_progress': inp, 'blocked': blk, 'total_projects': projs,
+            'total_volume': vol, 'avg_tat_hours': avg, 'priority_data': pdata,
+            'completion_rate': round(done / total * 100, 1) if total else 0,
+            'total_users': total_users,
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+# ── Task Names Page ────────────────────────────────────────────────────────────
+
+@app.route('/task-names')
+@login_required
+def task_names_page():
+    return render_template('task_names.html', user=current_user)
+
+
+# ── Task Names API ─────────────────────────────────────────────────────────────
+
+@app.route('/api/task-names', methods=['GET'])
+@login_required
+def get_task_names():
+    try:
+        items = TaskName.query.order_by(TaskName.process, TaskName.task_name).all()
+        return jsonify([i.to_dict() for i in items])
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/task-names', methods=['POST'])
+@login_required
+def create_task_name():
+    try:
+        data = request.get_json(silent=True) or {}
+        if not data.get('process'):
+            return jsonify({'error': 'Process is required'}), 400
+        if not data.get('task_name'):
+            return jsonify({'error': 'Task name is required'}), 400
+        cap = int(data.get('cap_timing', 0))
+        if cap < 1:
+            return jsonify({'error': 'Cap timing must be >= 1'}), 400
+        tn = TaskName(
+            process=sanitize(data['process'])[:200],
+            task_name=sanitize(data['task_name'])[:300],
+            cap_timing=cap, status=data.get('status', 'active'),
+            created_by=current_user.id,
+        )
+        db.session.add(tn)
+        db.session.commit()
+        return jsonify(tn.to_dict()), 201
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/task-names/<int:tid>', methods=['PUT'])
+@login_required
+def update_task_name(tid):
+    try:
+        tn = db.session.get(TaskName, tid)  # BUG-06 FIX
+        if tn is None:
+            return jsonify({'error': 'Task name not found'}), 404
+        data = request.get_json(silent=True) or {}
+        if 'process'    in data: tn.process   = sanitize(data['process'])[:200]
+        if 'task_name'  in data: tn.task_name = sanitize(data['task_name'])[:300]
+        if 'cap_timing' in data: tn.cap_timing = max(1, int(data['cap_timing']))
+        if 'status' in data and data['status'] in ('active', 'inactive'):
+            tn.status = data['status']
+        db.session.commit()
+        return jsonify(tn.to_dict())
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/task-names/<int:tid>', methods=['DELETE'])
+@login_required
+def delete_task_name(tid):
+    try:
+        tn = db.session.get(TaskName, tid)  # BUG-06 FIX
+        if tn is None:
+            return jsonify({'error': 'Task name not found'}), 404
+        db.session.delete(tn)
+        db.session.commit()
+        return jsonify({'success': True})
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/task-names/bulk', methods=['POST'])
+@login_required
+def bulk_import_task_names():
+    try:
+        data = request.get_json(silent=True) or {}
+        rows = data.get('rows', [])
+        if not rows:
+            return jsonify({'error': 'No rows provided'}), 400
+        count = 0
+        for row in rows:
+            cap = int(row.get('cap_timing', 0))
+            if cap < 1:
+                continue
+            tn = TaskName(
+                process=sanitize(str(row.get('process', '')))[:200],
+                task_name=sanitize(str(row.get('task_name', '')))[:300],
+                cap_timing=cap, status='active', created_by=current_user.id,
+            )
+            db.session.add(tn)
+            count += 1
+        db.session.commit()
+        return jsonify({'imported': count}), 201
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/task-names/parse-xlsx', methods=['POST'])
+@login_required
+def parse_task_names_xlsx():
+    """Server-side xlsx parsing — eliminates CDN dependency on client."""
+    try:
+        if 'file' not in request.files:
+            return jsonify({'error': 'No file uploaded'}), 400
+        f = request.files['file']
+        if not f.filename or not f.filename.lower().endswith('.xlsx'):
+            return jsonify({'error': 'Please upload a .xlsx file'}), 400
+        from openpyxl import load_workbook
+        wb = load_workbook(f.stream, read_only=True, data_only=True)
+        ws = wb.active
+        rows_iter = ws.iter_rows(values_only=True)
+        # First row = headers
+        try:
+            headers = [str(h).strip().lower() if h is not None else '' for h in next(rows_iter)]
+        except StopIteration:
+            return jsonify({'error': 'File is empty'}), 400
+        # Map header names to indices
+        def find_col(*names):
+            for name in names:
+                if name in headers:
+                    return headers.index(name)
+            return None
+        proc_idx = find_col('process')
+        task_idx = find_col('tasks', 'task', 'task name', 'taskname')
+        cap_idx  = find_col('cap timings (mins)', 'cap timings', 'cap timing', 'cap_timing', 'timing')
+        if proc_idx is None or task_idx is None or cap_idx is None:
+            missing = []
+            if proc_idx is None: missing.append('Process')
+            if task_idx is None: missing.append('Tasks')
+            if cap_idx  is None: missing.append('Cap Timings (mins)')
+            return jsonify({'error': f'Missing required columns: {", ".join(missing)}'}), 400
+        parsed = []
+        for i, row in enumerate(rows_iter):
+            def cell(idx):
+                v = row[idx] if idx < len(row) else None
+                return str(v).strip() if v is not None else ''
+            process   = cell(proc_idx)
+            task_name = cell(task_idx)
+            cap_raw   = cell(cap_idx)
+            try: cap = int(float(cap_raw)) if cap_raw else 0
+            except: cap = 0
+            errors = []
+            if not process:   errors.append('Missing Process')
+            if not task_name: errors.append('Missing Task')
+            if cap < 1:       errors.append('Invalid Cap Timing')
+            parsed.append({
+                'idx': i + 1,
+                'process':   sanitize(process)[:200],
+                'task_name': sanitize(task_name)[:300],
+                'cap_timing': cap,
+                'errors': errors,
+                'valid': len(errors) == 0,
+            })
+        wb.close()
+        return jsonify({'rows': parsed}), 200
+    except Exception as e:
+        return jsonify({'error': f'Failed to parse file: {str(e)}'}), 500
+
+
+@app.route('/api/task-names/template', methods=['GET'])
+@login_required
+def download_task_template():
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+        from openpyxl.utils import get_column_letter
+
+        wb = Workbook()
+        ws = wb.active
+        ws.title = 'Task Import Template'
+
+        thin   = Side(style='thin', color='CCCCCC')
+        border = Border(left=thin, right=thin, top=thin, bottom=thin)
+        headers    = ['Process', 'Tasks', 'Cap Timings (mins)']
+        col_widths = [30, 40, 22]
+
+        for i, (h, w) in enumerate(zip(headers, col_widths), 1):
+            c = ws.cell(row=1, column=i, value=h)
+            c.font      = Font(name='Arial', bold=True, color='FFFFFF', size=11)
+            c.fill      = PatternFill('solid', start_color='0A0A0F')
+            c.alignment = Alignment(horizontal='center', vertical='center')
+            c.border    = border
+            ws.column_dimensions[get_column_letter(i)].width = w
+        ws.row_dimensions[1].height = 30
+
+        samples = [
+            ('Data Processing',   'Data Validation',        45),
+            ('Data Processing',   'Data Cleansing',         30),
+            ('Report Generation', 'Monthly Summary Report', 60),
+            ('Report Generation', 'Dashboard Update',       20),
+            ('Quality Check',     'Peer Review',            90),
+            ('Quality Check',     'Final Approval',         15),
+        ]
+        alt = PatternFill('solid', start_color='F5F3EE')
+        for r, row in enumerate(samples, 2):
+            for col, val in enumerate(row, 1):
+                c = ws.cell(row=r, column=col, value=val)
+                c.font      = Font(name='Arial', size=10)
+                c.alignment = Alignment(horizontal='left', vertical='center')
+                c.border    = border
+                if r % 2 == 0:
+                    c.fill = alt
+
+        wi = wb.create_sheet('Instructions')
+        wi['A1'] = 'HOW TO USE THIS TEMPLATE'
+        wi['A1'].font = Font(name='Arial', bold=True, size=14, color='FF4D2E')
+        inst = [
+            ('Column', 'Description', 'Example'),
+            ('Process', 'High-level process or category', 'Data Processing'),
+            ('Tasks', 'Specific task name', 'Data Validation'),
+            ('Cap Timings (mins)', 'Time cap in minutes (numbers only)', '45'),
+        ]
+        for ri, row in enumerate(inst, 3):
+            for ci, val in enumerate(row, 1):
+                c = wi.cell(row=ri, column=ci, value=val)
+                if ri == 3:
+                    c.font      = Font(name='Arial', bold=True, color='FFFFFF')
+                    c.fill      = PatternFill('solid', start_color='0A0A0F')
+                    c.alignment = Alignment(horizontal='center')
+                else:
+                    c.font = Font(name='Arial', size=10)
+        wi.column_dimensions['A'].width = 25
+        wi.column_dimensions['B'].width = 45
+        wi.column_dimensions['C'].width = 25
+
+        buf = io.BytesIO()
+        wb.save(buf)
+        buf.seek(0)
+        return send_file(
+            buf,
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            as_attachment=True,
+            download_name='task_import_template.xlsx',
+        )
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+
+# ── Processes API ───────────────────────────────────────────────────────────────────
+
+@app.route('/api/processes', methods=['GET'])
+@login_required
+def get_processes():
+    try:
+        items = Process.query.order_by(Process.name).all()
+        return jsonify([p.to_dict() for p in items])
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/processes', methods=['POST'])
+@login_required
+def create_process():
+    try:
+        if current_user.role not in ('admin', 'lead'):
+            return jsonify({'error': 'Unauthorized'}), 403
+        data = request.get_json(silent=True) or {}
+        name = sanitize(data.get('name', '')).strip()
+        if not name:
+            return jsonify({'error': 'Process name is required'}), 400
+        if Process.query.filter_by(name=name).first():
+            return jsonify({'error': 'Process already exists'}), 409
+        p = Process(name=name[:200], created_by=current_user.id)
+        db.session.add(p)
+        db.session.commit()
+        return jsonify(p.to_dict()), 201
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/processes/<int:pid>', methods=['PUT'])
+@login_required
+def update_process(pid):
+    try:
+        if current_user.role not in ('admin', 'lead'):
+            return jsonify({'error': 'Unauthorized'}), 403
+        p = db.session.get(Process, pid)
+        if p is None:
+            return jsonify({'error': 'Process not found'}), 404
+        data = request.get_json(silent=True) or {}
+        new_name = sanitize(data.get('name', '')).strip()
+        if not new_name:
+            return jsonify({'error': 'Process name is required'}), 400
+        existing = Process.query.filter_by(name=new_name).first()
+        if existing and existing.id != pid:
+            return jsonify({'error': 'Process name already exists'}), 409
+        old_name = p.name
+        p.name = new_name[:200]
+        # Cascade rename to all TaskName rows that use the old name
+        TaskName.query.filter_by(process=old_name).update({'process': new_name})
+        db.session.commit()
+        return jsonify(p.to_dict())
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/processes/<int:pid>', methods=['DELETE'])
+@login_required
+def delete_process(pid):
+    try:
+        if current_user.role not in ('admin', 'lead'):
+            return jsonify({'error': 'Unauthorized'}), 403
+        p = db.session.get(Process, pid)
+        if p is None:
+            return jsonify({'error': 'Process not found'}), 404
+        task_count = TaskName.query.filter_by(process=p.name).count()
+        if task_count > 0:
+            return jsonify({'error': f'Cannot delete: {task_count} task name(s) use this process. Reassign them first.'}), 409
+        db.session.delete(p)
+        db.session.commit()
+        return jsonify({'success': True})
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
+
+
+# ── Seed ───────────────────────────────────────────────────────────────────────
+
+def seed_db():
+    """Create tables and insert demo data on first run."""
+    db.create_all()
+
+    # BUG-07 FIX: Removed the fragile raw ALTER TABLE migration.
+    # The `process` column is now part of the Task model definition above and
+    # will be created correctly by db.create_all() for all new databases.
+    # For existing databases, use Flask-Migrate (Alembic) to manage migrations.
+
+    if User.query.filter_by(username='admin').first():
+        # Seed processes if missing (in case DB existed before this feature)
+        if Process.query.count() == 0:
+            seed_processes = ['NG 1.0', 'NG 2.0', 'Integrated Studies',
+                              'Integrated Standards', 'NG Trials', 'Migrations']
+            for pname in seed_processes:
+                db.session.add(Process(name=pname))
+            db.session.commit()
+        return  # Already seeded
+
+    print('Seeding demo data…')
+    admin  = User(username='admin',   email='admin@huddle.io',
+                  enterprise_id='ENT-ADMIN-001', role='admin')
+    lead   = User(username='lead1',   email='lead@huddle.io',
+                  enterprise_id='ENT-LEAD-001',  role='lead')
+    member = User(username='member1', email='member@huddle.io',
+                  enterprise_id='ENT-MEM-001',   role='member')
+    admin.set_password('Admin@1234')
+    lead.set_password('Lead@1234')
+    member.set_password('Member@1234')
+    db.session.add_all([admin, lead, member])
+    db.session.commit()
+
+    p = Project(
+        project_code='PRJ-DEMO0001', name='Huddle Demo Project',
+        description='Sample project to get started.',
+        owner_id=admin.id, deadline=datetime.utcnow() + timedelta(days=30),
+    )
+    db.session.add(p)
+    db.session.commit()
+
+    rows = [
+        ('RFC-2024-1001', 'Data Migration',    'Migrate legacy records',  'pending',     'low',       10,  4),
+        ('RFC-2024-1002', 'API Integration',   'Connect payment gateway', 'in_progress', 'high',      25,  8),
+        ('RFC-2024-1003', 'UI Redesign',        'Redesign dashboard',     'review',      'medium',    15,  6),
+        ('RFC-2024-1004', 'Security Audit',     'Run penetration tests',  'done',        'critical',   5, 16),
+        ('RFC-2024-1005', 'Load Testing',       'Test 1000 virtual users','blocked',     'high',      20, 12),
+    ]
+    for sr, task, sub, status, pri, vol, tat in rows:
+        t = Task(
+            study_id=gen_study_id(), sr_rfc=sr, project_id=p.id,
+            assigned_to=member.id, task_name=task, subtask=sub,
+            status=status, priority=pri, volume=vol,
+            turnaround_time=tat, created_by=admin.id,
+        )
+        if status in ('in_progress', 'review', 'done'):
+            t.started_at = datetime.utcnow() - timedelta(hours=tat)
+        if status == 'done':
+            t.completed_at = datetime.utcnow()
+        db.session.add(t)
+
+    seed_processes = ['NG 1.0', 'NG 2.0', 'Integrated Studies',
+                       'Integrated Standards', 'NG Trials', 'Migrations']
+    for pname in seed_processes:
+        if not Process.query.filter_by(name=pname).first():
+            db.session.add(Process(name=pname, created_by=admin.id))
+    db.session.commit()
+
+    task_names_seed = [
+        ('Data Processing',   'Data Validation',        45),
+        ('Data Processing',   'Data Cleansing',         30),
+        ('Report Generation', 'Monthly Summary Report', 60),
+        ('Report Generation', 'Dashboard Update',       20),
+        ('Quality Check',     'Peer Review',            90),
+        ('Quality Check',     'Final Approval',         15),
+    ]
+    for proc, tname, cap in task_names_seed:
+        tn = TaskName(process=proc, task_name=tname, cap_timing=cap,
+                      status='active', created_by=admin.id)
+        db.session.add(tn)
+
+    db.session.commit()
+    print('Done! Login: admin / Admin@1234')
+
+
+if __name__ == '__main__':
+    with app.app_context():
+        seed_db()
+    # BUG-08 FIX: debug flag driven by FLASK_DEBUG env var, defaulting to off.
+    app.run(
+        debug=app.config['DEBUG'],
+        host='0.0.0.0',
+        port=5000,
+        threaded=True,
+    )

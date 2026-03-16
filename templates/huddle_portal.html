@@ -1,0 +1,1386 @@
+<!DOCTYPE html>
+<!--
+  huddle_portal.html — Huddle Portal Single-Page Application
+  ===========================================================
+  Served by the Flask /huddle route (all authenticated roles).
+
+  Architecture
+  ────────────
+  Self-contained SPA.  All view switching is CSS-based (no routing library).
+  Data lives in in-memory JS arrays updated by REST API calls and SSE events.
+
+  View modes
+  ──────────
+    table   — classic sortable/filterable task table (default)
+    kanban  — drag-and-drop board grouped by status
+
+  Sidebar nav sections:
+    My Tasks     — tasks list / kanban (the main working area)
+    New Task     — shortcut to open the create-task modal
+    My Stats     — personal analytics summary
+
+  Key meta tags
+  ─────────────
+  <meta name="csrf-token">   — CSRF token value injected by Jinja; read by CSRF()
+  <meta name="user-id">      — current user's ID; used to scope visibility checks
+  <meta name="user-role">    — 'admin' | 'lead' | 'member'; controls UI affordances
+
+  Security
+  ────────
+  • escHtml() wraps all server-supplied strings before innerHTML injection (XSS).
+  • CSRF() is called on every mutating fetch to read the current session token.
+  • CAN_ALL = true for admin/lead — gates bulk delete and cross-user features.
+
+  Real-time
+  ─────────
+  initSSE() opens EventSource('/api/stream').  On task_created / task_updated /
+  task_deleted events the in-memory arrays are patched and the active view is
+  re-rendered with no page reload.  The SSE connection auto-reconnects on error.
+
+  Persistence helpers
+  ───────────────────
+  saveURL() / loadURL() — encode active filter state into URL query params so
+  the current filter set survives page refresh and can be bookmarked/shared.
+-->
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="csrf-token" content="{{ csrf_token() }}">
+<meta name="user-id"   content="{{ user.id }}">
+<meta name="user-role" content="{{ user.role }}">
+<meta name="viewport"  content="width=device-width, initial-scale=1.0">
+<title>Huddle Portal</title>
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet">
+<style>
+:root{
+  --ink:#0a0a0f;--paper:#f4f1eb;--accent:#ff4d2e;--green:#22c55e;
+  --yellow:#eab308;--blue:#3b82f6;--purple:#a855f7;--red:#ef4444;
+  --gold:#c9a84c;--card:#fff;--border:#e5e3dc;--muted:#888;--sw:248px;
+}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'DM Sans',sans-serif;background:var(--paper);color:var(--ink);min-height:100vh;display:flex;}
+
+/* ─── Sidebar ─── */
+.sidebar{width:var(--sw);background:var(--ink);display:flex;flex-direction:column;position:fixed;top:0;left:0;bottom:0;z-index:100;}
+.sb-brand{padding:22px 20px 16px;border-bottom:1px solid rgba(255,255,255,.07);}
+.sb-logo{font-family:'Syne',sans-serif;font-size:1.45rem;font-weight:800;color:#fff;letter-spacing:-1px;}
+.sb-logo em{color:var(--gold);font-style:normal;}
+.sb-sub{font-size:.6rem;letter-spacing:3px;text-transform:uppercase;color:rgba(255,255,255,.25);margin-top:5px;}
+.sb-user{padding:13px 20px;border-bottom:1px solid rgba(255,255,255,.07);display:flex;align-items:center;gap:10px;}
+.sb-avatar{width:32px;height:32px;border-radius:9px;background:var(--gold);display:flex;align-items:center;justify-content:center;font-family:'Syne',sans-serif;font-weight:700;font-size:.8rem;color:var(--ink);flex-shrink:0;}
+.sb-uname{font-size:.85rem;font-weight:500;color:#fff;}
+.sb-role{font-size:.68rem;color:rgba(255,255,255,.32);text-transform:capitalize;}
+.sb-nav{padding:10px;flex:1;overflow-y:auto;}
+.nav-lbl{font-size:.58rem;letter-spacing:2.5px;text-transform:uppercase;color:rgba(255,255,255,.22);padding:12px 10px 5px;}
+.sb-stats{padding:12px 14px;margin:4px 0 8px;border-radius:10px;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.06);}
+.sb-stat{display:flex;justify-content:space-between;padding:5px 0;font-size:.78rem;}
+.sb-stat span:first-child{color:rgba(255,255,255,.38);}
+.sb-stat strong{color:#fff;font-family:'Syne',sans-serif;}
+.ks-box{background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.07);border-radius:9px;padding:10px 12px;margin:4px 0;}
+.ks-row{display:flex;justify-content:space-between;align-items:center;padding:3px 0;font-size:.7rem;}
+.ks-key{background:rgba(255,255,255,.14);border-radius:4px;padding:1px 7px;font-family:monospace;font-size:.68rem;color:rgba(255,255,255,.75);}
+.ks-desc{color:rgba(255,255,255,.32);}
+.sb-foot{padding:14px 20px;border-top:1px solid rgba(255,255,255,.07);display:flex;flex-direction:column;gap:8px;flex-shrink:0;}
+.sw-btn{display:flex;align-items:center;gap:8px;padding:9px 12px;border-radius:8px;background:rgba(255,77,46,.1);border:1px solid rgba(255,77,46,.22);color:var(--accent);font-size:.8rem;cursor:pointer;text-decoration:none;transition:all .15s;}
+.sw-btn:hover{background:rgba(255,77,46,.18);}
+.lo-btn{display:flex;align-items:center;justify-content:center;gap:8px;padding:9px 12px;border-radius:8px;background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.22);color:#f87171;font-size:.8rem;font-weight:500;text-decoration:none;cursor:pointer;transition:all .15s;}
+.lo-btn:hover{background:rgba(239,68,68,.22);color:#fff;}
+
+/* ─── Layout ─── */
+.main{margin-left:var(--sw);flex:1;display:flex;flex-direction:column;min-height:100vh;min-width:0;}
+.topbar{background:var(--card);border-bottom:1px solid var(--border);padding:10px 20px;display:flex;align-items:center;gap:8px;position:sticky;top:0;z-index:50;}
+.page-title{font-family:'Syne',sans-serif;font-size:1.1rem;font-weight:700;white-space:nowrap;}
+.tb-spacer{flex:1;}
+.tb-clock{display:flex;flex-direction:column;align-items:flex-end;line-height:1.25;margin-right:4px;}
+.tc-time{font-family:'Syne',sans-serif;font-size:.92rem;font-weight:700;color:var(--ink);}
+.tc-date{font-size:.67rem;color:var(--muted);}
+.tb-right{display:flex;gap:5px;align-items:center;flex-shrink:0;}
+
+/* ─── View toggle ─── */
+.view-tog{display:flex;background:#f0ede8;border-radius:8px;padding:3px;gap:2px;}
+.vt{padding:5px 12px;border:none;background:transparent;border-radius:6px;font-size:.78rem;font-weight:500;cursor:pointer;color:var(--muted);transition:all .15s;display:flex;align-items:center;gap:4px;}
+.vt.active{background:var(--card);color:var(--ink);box-shadow:0 1px 4px rgba(0,0,0,.1);}
+
+/* ─── Buttons ─── */
+.btn{padding:7px 14px;border-radius:8px;font-family:'DM Sans',sans-serif;font-size:.82rem;font-weight:500;cursor:pointer;border:none;transition:all .15s;display:inline-flex;align-items:center;gap:5px;white-space:nowrap;}
+.btn-primary{background:var(--ink);color:#fff;}.btn-primary:hover{background:#333;}
+.btn-gold{background:var(--gold);color:var(--ink);}.btn-gold:hover{opacity:.88;}
+.btn-outline{background:transparent;border:1.5px solid var(--border);color:var(--ink);}.btn-outline:hover{border-color:var(--ink);}
+.btn-green{background:var(--green);color:#fff;}
+.btn-danger{background:var(--red);color:#fff;}.btn-danger:hover{opacity:.85;}
+.btn-sm{padding:5px 11px;font-size:.78rem;}
+
+/* ─── Content ─── */
+.content{padding:22px 26px;}
+
+/* ─── Stats cards ─── */
+.qstats{display:grid;grid-template-columns:repeat(auto-fit,minmax(115px,1fr));gap:10px;margin-bottom:18px;}
+.qcard{background:var(--card);border:1.5px solid var(--border);border-radius:11px;padding:13px 16px;position:relative;overflow:hidden;cursor:pointer;transition:transform .12s,box-shadow .12s;}
+.qcard:hover{transform:translateY(-2px);box-shadow:0 5px 16px rgba(0,0,0,.09);}
+.qcard.qf-active{border-color:var(--c,var(--gold));box-shadow:0 0 0 3px rgba(201,168,76,.18);}
+.qcard::before{content:'';position:absolute;top:0;left:0;right:0;height:3px;background:var(--c,var(--gold));}
+.qv{font-family:'Syne',sans-serif;font-size:1.6rem;font-weight:800;line-height:1;margin-bottom:3px;}
+.ql{font-size:.67rem;color:var(--muted);text-transform:uppercase;letter-spacing:1px;}
+
+/* ─── Toolbar ─── */
+.tbar{display:flex;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap;}
+.search-wrap{position:relative;flex:1;min-width:200px;}
+.search-wrap input{width:100%;padding:8px 36px 8px 36px;border:1.5px solid var(--border);border-radius:8px;font-family:'DM Sans',sans-serif;font-size:.84rem;background:var(--card);outline:none;transition:border-color .15s;}
+.search-wrap input:focus{border-color:var(--gold);}
+.si{position:absolute;left:11px;top:50%;transform:translateY(-50%);color:var(--muted);pointer-events:none;}
+.sc{position:absolute;right:8px;top:50%;transform:translateY(-50%);background:none;border:none;color:var(--muted);cursor:pointer;font-size:.75rem;display:none;}
+.search-wrap:has(input:not(:placeholder-shown)) .sc{display:block;}
+.result-count{font-size:.8rem;color:var(--muted);white-space:nowrap;}
+
+/* ─── Bulk toolbar ─── */
+.bulk-bar{display:none;align-items:center;gap:8px;padding:9px 14px;background:#fffbf0;border:1.5px solid rgba(201,168,76,.35);border-radius:10px;margin-bottom:10px;flex-wrap:wrap;}
+.bulk-bar.on{display:flex;animation:fadeIn .15s ease;}
+@keyframes fadeIn{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:translateY(0)}}
+.bulk-count{font-weight:700;font-size:.86rem;color:#7c5c00;}
+.bulk-div{width:1px;height:20px;background:var(--border);}
+.bulk-sel{padding:5px 9px;border:1.5px solid var(--border);border-radius:7px;font-family:'DM Sans',sans-serif;font-size:.78rem;background:var(--card);outline:none;cursor:pointer;color:var(--ink);}
+
+/* ─── Filter pills ─── */
+.pills{display:flex;flex-wrap:wrap;gap:5px;margin-bottom:10px;}
+.pill{display:inline-flex;align-items:center;gap:4px;background:rgba(201,168,76,.12);border:1px solid rgba(201,168,76,.3);font-size:.74rem;padding:3px 9px 3px 10px;border-radius:20px;}
+.pill-x{background:none;border:none;cursor:pointer;color:var(--muted);font-size:.9rem;line-height:1;padding:0;}
+.pill-x:hover{color:var(--red);}
+
+/* ─── Panel ─── */
+.panel{background:var(--card);border:1px solid var(--border);border-radius:12px;overflow:hidden;margin-bottom:16px;}
+.ph{padding:13px 18px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;}
+.pt{font-family:'Syne',sans-serif;font-weight:700;font-size:.92rem;}
+
+/* ─── Table ─── */
+.tbl-wrap{overflow-x:auto;}
+table{width:100%;border-collapse:collapse;font-size:.81rem;}
+thead tr.th-lbl th{background:#f9f8f5;padding:9px 8px 7px;text-align:left;font-size:.62rem;text-transform:uppercase;letter-spacing:.9px;color:var(--muted);font-weight:600;border-bottom:1px solid var(--border);white-space:nowrap;cursor:pointer;user-select:none;}
+thead tr.th-lbl th:hover{color:var(--ink);}
+thead tr.th-lbl th.sort-asc::after{content:' ▲';font-size:.55rem;opacity:.7;}
+thead tr.th-lbl th.sort-desc::after{content:' ▼';font-size:.55rem;opacity:.7;}
+thead tr.th-lbl th.nosort{cursor:default;}thead tr.th-lbl th.nosort:hover{color:var(--muted);}
+thead tr.th-fil th{background:#faf9f6;padding:4px 5px;border-bottom:2px solid var(--border);}
+thead tr.th-fil th select,thead tr.th-fil th input{width:100%;padding:4px 7px;border:1.5px solid var(--border);border-radius:6px;font-family:'DM Sans',sans-serif;font-size:.74rem;background:#fff;outline:none;color:var(--ink);transition:border-color .15s;}
+thead tr.th-fil th select:focus,thead tr.th-fil th input:focus{border-color:var(--gold);}
+thead tr.th-fil th.nf{background:#faf9f6;}
+tbody td{padding:9px 8px;border-bottom:1px solid var(--border);vertical-align:middle;}
+tbody tr:last-child td{border-bottom:none;}
+tbody tr:hover{background:#fafaf8;}
+tbody tr.sel-row{background:#fffbf0!important;}
+
+/* ─── Inline dropdowns ─── */
+.il-sel{padding:3px 6px;border:1.5px solid transparent;border-radius:6px;font-family:'DM Sans',sans-serif;font-size:.79rem;background:transparent;outline:none;cursor:pointer;color:var(--ink);transition:border-color .15s;}
+.il-sel:hover{border-color:var(--border);background:#fff;}
+.il-sel:focus{border-color:var(--gold);background:#fff;}
+.il-saving{opacity:.5;pointer-events:none;}
+
+/* ─── Badges ─── */
+.mono{font-family:monospace;font-size:.75rem;color:#555;}
+.badge{display:inline-block;padding:2px 8px;border-radius:20px;font-size:.67rem;font-weight:500;text-transform:capitalize;white-space:nowrap;}
+.badge-pending{background:#fef9c3;color:#854d0e;}
+.badge-in_progress{background:#dbeafe;color:#1e40af;}
+.badge-review{background:#f3e8ff;color:#6b21a8;}
+.badge-done{background:#dcfce7;color:#14532d;}
+.badge-blocked{background:#fee2e2;color:#991b1b;}
+.badge-low{background:#f1f5f9;color:#475569;}
+.badge-medium{background:#fef9c3;color:#854d0e;}
+.badge-high{background:#fed7aa;color:#9a3412;}
+.badge-critical{background:#fee2e2;color:#991b1b;}
+
+/* ─── Kanban ─── */
+.kanban{display:none;gap:12px;overflow-x:auto;padding-bottom:16px;align-items:flex-start;}
+.kanban.on{display:flex;}
+.k-col{flex:0 0 250px;background:#f5f3ee;border-radius:12px;display:flex;flex-direction:column;max-height:calc(100vh - 230px);}
+.k-hdr{padding:11px 13px 9px;display:flex;align-items:center;gap:7px;border-bottom:1px solid var(--border);flex-shrink:0;}
+.k-dot{width:8px;height:8px;border-radius:50%;}
+.k-title{font-family:'Syne',sans-serif;font-weight:700;font-size:.85rem;}
+.k-cnt{font-size:.72rem;color:var(--muted);margin-left:auto;background:rgba(0,0,0,.07);border-radius:20px;padding:1px 8px;}
+.k-cards{padding:8px;overflow-y:auto;flex:1;display:flex;flex-direction:column;gap:7px;}
+.k-cards::-webkit-scrollbar{width:3px;}
+.k-cards::-webkit-scrollbar-thumb{background:#d0cdc7;border-radius:2px;}
+.k-card{background:var(--card);border:1.5px solid var(--border);border-radius:9px;padding:11px 12px;cursor:grab;user-select:none;transition:border-color .15s,box-shadow .15s;}
+.k-card:hover{border-color:#bbb;box-shadow:0 3px 10px rgba(0,0,0,.09);}
+.k-card.dragging{opacity:.4;transform:rotate(1.5deg);}
+.k-name{font-weight:600;font-size:.83rem;margin-bottom:5px;line-height:1.35;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;}
+.k-meta{font-size:.72rem;color:var(--muted);display:flex;flex-direction:column;gap:3px;}
+.k-row{display:flex;align-items:center;justify-content:space-between;gap:4px;}
+.k-av{width:17px;height:17px;border-radius:4px;display:inline-flex;align-items:center;justify-content:center;font-family:'Syne',sans-serif;font-weight:700;font-size:.58rem;color:#fff;flex-shrink:0;}
+.k-pri{width:6px;height:6px;border-radius:50%;flex-shrink:0;}
+.k-col.drop-over>.k-cards{background:rgba(201,168,76,.06);border:1.5px dashed rgba(201,168,76,.5);border-radius:8px;}
+.k-empty{text-align:center;padding:20px 10px;color:var(--muted);font-size:.78rem;opacity:.55;}
+
+/* ─── Modals ─── */
+.overlay{position:fixed;inset:0;background:rgba(10,10,15,.65);backdrop-filter:blur(4px);z-index:200;display:none;align-items:center;justify-content:center;}
+.overlay.open{display:flex;}
+.modal{background:var(--card);border-radius:16px;width:540px;max-width:95vw;max-height:92vh;overflow-y:auto;box-shadow:0 24px 70px rgba(0,0,0,.3);}
+.modal-lg{width:700px;}
+.mh{padding:20px 24px 0;display:flex;align-items:center;justify-content:space-between;}
+.mt{font-family:'Syne',sans-serif;font-size:1.05rem;font-weight:700;}
+.mc{background:none;border:none;font-size:1.35rem;cursor:pointer;color:var(--muted);line-height:1;}
+.mb{padding:16px 24px 24px;}
+.fr{display:grid;grid-template-columns:1fr 1fr;gap:11px;}
+.fg{margin-bottom:12px;}
+.fg label{display:block;font-size:.71rem;font-weight:600;text-transform:uppercase;letter-spacing:.8px;margin-bottom:5px;color:var(--muted);}
+.fg input,.fg select,.fg textarea{width:100%;padding:9px 12px;border:1.5px solid var(--border);border-radius:8px;font-family:'DM Sans',sans-serif;font-size:.875rem;outline:none;transition:border-color .15s;color:var(--ink);}
+.fg input:focus,.fg select:focus,.fg textarea:focus{border-color:var(--gold);}
+.fg textarea{resize:vertical;min-height:64px;}
+.cap-badge{padding:9px 12px;border:1.5px solid #bae6fd;border-radius:8px;background:#f0f9ff;color:#0369a1;font-weight:600;font-size:.9rem;display:flex;align-items:center;min-height:40px;}
+.ma{display:flex;gap:8px;justify-content:flex-end;margin-top:6px;}
+.dg{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:14px;}
+.dg .df label{display:block;font-size:.67rem;color:var(--muted);text-transform:uppercase;letter-spacing:.8px;margin-bottom:3px;}
+.drop-zone{border:2px dashed var(--border);border-radius:10px;padding:26px;text-align:center;cursor:pointer;transition:all .2s;margin-bottom:12px;}
+.drop-zone:hover,.drop-zone.drag{border-color:var(--gold);background:#fffdf5;}
+.drop-zone p{color:var(--muted);font-size:.85rem;margin-top:6px;}
+.prev-wrap{max-height:200px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;margin-bottom:11px;}
+.toast{position:fixed;bottom:22px;right:22px;background:var(--ink);color:#fff;padding:11px 20px;border-radius:10px;font-size:.875rem;z-index:999;transform:translateY(80px);opacity:0;transition:all .3s;}
+.toast.show{transform:translateY(0);opacity:1;}
+.empty{text-align:center;padding:46px 20px;color:var(--muted);}
+.ei{font-size:2.2rem;margin-bottom:8px;opacity:.4;}
+/* ─── SSE indicator ─── */
+.sse-dot{width:7px;height:7px;border-radius:50%;background:#888;display:inline-block;margin-right:4px;transition:background .3s;}
+.sse-dot.live{background:var(--green);animation:pulse 2s infinite;}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+
+/* ─── Audit log tab ─── */
+.detail-tabs{display:flex;gap:2px;border-bottom:1px solid var(--border);margin-bottom:14px;}
+.dtab{background:none;border:none;padding:8px 16px;font-family:'DM Sans',sans-serif;font-size:.82rem;font-weight:500;cursor:pointer;border-bottom:2px solid transparent;color:var(--muted);transition:all .15s;}
+.dtab.active{color:var(--ink);border-bottom-color:var(--gold);}
+.audit-row{display:flex;gap:8px;align-items:flex-start;padding:7px 0;border-bottom:1px solid var(--border);font-size:.8rem;}
+.audit-row:last-child{border-bottom:none;}
+.audit-time{color:var(--muted);font-size:.7rem;white-space:nowrap;min-width:110px;}
+.audit-who{font-weight:600;flex-shrink:0;}
+.audit-field{background:#f1f5f9;border-radius:4px;padding:1px 6px;font-size:.72rem;color:#475569;flex-shrink:0;}
+.audit-arrow{color:var(--muted);flex-shrink:0;}
+.audit-val{font-size:.78rem;}
+::-webkit-scrollbar{width:5px;height:5px;}
+::-webkit-scrollbar-thumb{background:#d0cdc7;border-radius:3px;}
+</style>
+</head>
+<body>
+
+<aside class="sidebar">
+  <div class="sb-brand">
+    <div class="sb-logo">Huddle<em>.</em></div>
+    <div class="sb-sub">Huddle Portal</div>
+  </div>
+  <div class="sb-user">
+    <div class="sb-avatar">{{ user.username[0].upper() }}</div>
+    <div>
+      <div class="sb-uname">{{ user.username }}</div>
+      <div class="sb-role">{{ user.role }}</div>
+    </div>
+  </div>
+  <nav class="sb-nav">
+    <div class="nav-lbl">Workspace</div>
+    <div class="ni active" style="display:flex;align-items:center;gap:10px;padding:9px 10px;border-radius:8px;background:rgba(255,255,255,.07);color:var(--gold);font-size:.875rem;margin-bottom:1px;">
+      <span style="width:20px;text-align:center">✅</span>My Tasks
+    </div>
+    <div class="nav-lbl">Quick Stats</div>
+    <div class="sb-stats" id="sbStats">
+      <div class="sb-stat"><span>Loading…</span></div>
+    </div>
+    <div class="nav-lbl">Keyboard Shortcuts</div>
+    <div class="ks-box">
+      <div class="ks-row"><span class="ks-key">N</span><span class="ks-desc">New task</span></div>
+      <div class="ks-row"><span class="ks-key">/</span><span class="ks-desc">Search</span></div>
+      <div class="ks-row"><span class="ks-key">K</span><span class="ks-desc">Kanban view</span></div>
+      <div class="ks-row"><span class="ks-key">R</span><span class="ks-desc">Refresh</span></div>
+      <div class="ks-row"><span class="ks-key">Esc</span><span class="ks-desc">Close / deselect</span></div>
+    </div>
+  </nav>
+  <div class="sb-foot">
+    {% if user.role in ['admin','lead'] %}
+    <a class="sw-btn" href="/admin">⚙️ Switch to Admin Portal</a>
+    {% endif %}
+    <a class="lo-btn" href="/logout">⏻ Sign Out</a>
+  </div>
+</aside>
+
+<div class="main">
+  <div class="topbar">
+    <div class="page-title">🎯 Tasks</div>
+    <div class="tb-spacer"></div>
+    <div class="tb-clock">
+      <span class="tc-time" id="tcTime">--:-- --</span>
+      <span class="tc-date" id="tcDate">--- --, ----</span>
+    </div>
+    <div class="tb-right">
+      <span title="Real-time sync" style="display:flex;align-items:center;font-size:.72rem;color:var(--muted);gap:3px;"><span class="sse-dot" id="sseDot"></span><span id="sseLabel">connecting…</span></span>
+      <div class="view-tog">
+        <button class="vt active" id="vtTable"  onclick="setView('table')" >⊞ Table</button>
+        <button class="vt"        id="vtKanban" onclick="setView('kanban')">◫ Kanban</button>
+      </div>
+      <button class="btn btn-outline btn-sm" onclick="exportExcel()">⬇ Export</button>
+      <button class="btn btn-outline btn-sm" onclick="openModal('mImport')">⬆ Import</button>
+      <button class="btn btn-outline btn-sm" onclick="downloadTemplate()">📋 Template</button>
+      <button class="btn btn-outline btn-sm" id="btnRefresh" onclick="refreshAll()" title="Refresh (R)">⟳</button>
+      <button class="btn btn-gold" onclick="openNewTask()" style="padding:8px 16px;font-size:.85rem;font-weight:700;" id="btnNew">+ New Task</button>
+    </div>
+  </div>
+
+  <div class="content">
+    <!-- Stat cards -->
+    <div class="qstats" id="qStats"></div>
+
+    <!-- Toolbar -->
+    <div class="tbar">
+      <div class="search-wrap">
+        <span class="si">🔍</span>
+        <input type="text" id="gSearch" placeholder="Search Study ID, SR/RFC, task, assignee…" oninput="applyFilters()" autocomplete="off">
+        <button class="sc" onclick="el('gSearch').value='';applyFilters()">✕</button>
+      </div>
+      <span class="result-count" id="tCount"></span>
+      <button class="btn btn-outline btn-sm" id="btnClearAll" style="display:none" onclick="clearAllFilters()">✕ Clear all</button>
+    </div>
+
+    <!-- Bulk action bar -->
+    <div class="bulk-bar" id="bulkBar">
+      <span class="bulk-count" id="bulkCount">0 selected</span>
+      <div class="bulk-div"></div>
+      <select class="bulk-sel" id="bkStatus" onchange="bulkAction('status',this)">
+        <option value="">Set status…</option>
+        <option value="pending">Pending</option>
+        <option value="in_progress">In Progress</option>
+        <option value="review">Review</option>
+        <option value="done">Done</option>
+        <option value="blocked">Blocked</option>
+      </select>
+      <select class="bulk-sel" id="bkPriority" onchange="bulkAction('priority',this)">
+        <option value="">Set priority…</option>
+        <option value="low">Low</option>
+        <option value="medium">Medium</option>
+        <option value="high">High</option>
+        <option value="critical">Critical</option>
+      </select>
+      <select class="bulk-sel" id="bkAssignee" onchange="bulkAction('assigned_to',this)">
+        <option value="">Reassign…</option>
+      </select>
+      {% if user.role in ['admin','lead'] %}
+      <button class="btn btn-danger btn-sm" onclick="bulkDelete()">🗑 Delete selected</button>
+      {% endif %}
+      <button class="btn btn-outline btn-sm" onclick="clearSel()">✕ Deselect</button>
+    </div>
+
+    <!-- Filter pills -->
+    <div class="pills" id="activePills"></div>
+
+    <!-- TABLE VIEW -->
+    <div id="tableView">
+      <div class="panel">
+        <div class="ph">
+          <span class="pt">Task List</span>
+          <span style="font-size:.72rem;color:var(--muted)">Click header to sort · Inline dropdowns to edit status/priority</span>
+        </div>
+        <div class="tbl-wrap">
+          <table>
+            <thead>
+              <tr class="th-lbl">
+                <th class="nosort" style="width:32px;padding-left:12px;">
+                  <input type="checkbox" id="selAll" onchange="selAllRows(this.checked)" style="cursor:pointer">
+                </th>
+                <th onclick="sortBy('study_id')"       data-col="study_id">Study ID</th>
+                <th onclick="sortBy('sr_rfc')"          data-col="sr_rfc">SR / RFC</th>
+                <th onclick="sortBy('process')"         data-col="process">Mapping Process</th>
+                <th onclick="sortBy('task_name')"       data-col="task_name">Task Name</th>
+                <th onclick="sortBy('subtask')"         data-col="subtask">Sub Task</th>
+                <th onclick="sortBy('assignee_name')"   data-col="assignee_name">Assignee</th>
+                <th onclick="sortBy('enterprise_id')"   data-col="enterprise_id">Ent. ID</th>
+                <th onclick="sortBy('turnaround_time')" data-col="turnaround_time">TAT (min)</th>
+                <th onclick="sortBy('volume')"          data-col="volume">Vol</th>
+                <th onclick="sortBy('started_at')"      data-col="started_at">Start</th>
+                <th onclick="sortBy('due_date')"        data-col="due_date">Due</th>
+                <th onclick="sortBy('status')"          data-col="status">Status</th>
+                <th onclick="sortBy('priority')"        data-col="priority">Priority</th>
+                <th class="nosort">Actions</th>
+              </tr>
+              <tr class="th-fil">
+                <th class="nf"></th>
+                <th><input id="cf_study_id"  type="text"   placeholder="filter…" oninput="applyFilters()"></th>
+                <th><input id="cf_sr_rfc"    type="text"   placeholder="filter…" oninput="applyFilters()"></th>
+                <th><select id="cf_process"  onchange="applyFilters()"><option value="">All</option></select></th>
+                <th><input id="cf_task_name" type="text"   placeholder="filter…" oninput="applyFilters()"></th>
+                <th><input id="cf_subtask"   type="text"   placeholder="filter…" oninput="applyFilters()"></th>
+                <th><select id="cf_assignee" onchange="applyFilters()"><option value="">All</option></select></th>
+                <th><input id="cf_ent_id"    type="text"   placeholder="filter…" oninput="applyFilters()"></th>
+                <th><input id="cf_tat"       type="number" placeholder="≤" oninput="applyFilters()" style="width:56px"></th>
+                <th><input id="cf_vol"       type="number" placeholder="≥" oninput="applyFilters()" style="width:56px"></th>
+                <th><input id="cf_started"   type="date"   onchange="applyFilters()"></th>
+                <th><input id="cf_due"       type="date"   onchange="applyFilters()"></th>
+                <th><select id="cf_status"   onchange="applyFilters()">
+                      <option value="">All</option>
+                      <option value="pending">Pending</option>
+                      <option value="in_progress">In Progress</option>
+                      <option value="review">Review</option>
+                      <option value="done">Done</option>
+                      <option value="blocked">Blocked</option>
+                    </select></th>
+                <th><select id="cf_priority" onchange="applyFilters()">
+                      <option value="">All</option>
+                      <option value="low">Low</option>
+                      <option value="medium">Medium</option>
+                      <option value="high">High</option>
+                      <option value="critical">Critical</option>
+                    </select></th>
+                <th class="nf"></th>
+              </tr>
+            </thead>
+            <tbody id="tBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- KANBAN VIEW -->
+    <div class="kanban" id="kanbanView"></div>
+  </div>
+</div>
+
+<!-- ADD / EDIT MODAL -->
+<div class="overlay" id="mTask">
+  <div class="modal modal-lg">
+    <div class="mh"><span class="mt" id="mTaskTitle">New Task</span><button class="mc" onclick="closeModal('mTask')">&#215;</button></div>
+    <div class="mb">
+      <input type="hidden" id="eTaskId">
+      <div class="fg" id="studyIdRow">
+        <label>Study ID *</label>
+        <input type="text" id="tStudyId" placeholder="e.g. STD-2024-001" maxlength="50">
+        <div id="tStudyIdDisplay" style="display:none;padding:9px 12px;border:1.5px solid var(--border);border-radius:8px;background:#f9f8f5;font-family:monospace;font-size:.9rem;color:#444"></div>
+      </div>
+      <div class="fg"><label>SR / RFC <small style="text-transform:none;font-weight:400;color:var(--muted)">(optional)</small></label><input type="text" id="tSrRfc" placeholder="e.g. RFC-2024-1001"></div>
+      <div class="fr">
+        <div class="fg"><label>Mapping Process *</label><select id="tProcess" onchange="filterTNByProcess()"><option value="">— Select —</option></select></div>
+        <div class="fg"><label>Cap Timing</label><div class="cap-badge" id="capBadge">—</div></div>
+      </div>
+      <div class="fg">
+        <label>Task Name * <small style="text-transform:none;font-weight:400;color:var(--muted)">(from Task Names list)</small></label>
+        <select id="tTaskName" onchange="onTNSelect()"><option value="">— Select Task Name —</option></select>
+        <div style="margin-top:5px;font-size:.73rem;color:var(--muted)">Can't find it? <a href="/admin" target="_blank" style="color:var(--gold);font-weight:600">Add in Admin Portal →</a></div>
+      </div>
+      <div class="fg">
+        <label>Sub Task <small style="text-transform:none;font-weight:400;color:var(--muted)">(letters &amp; numbers only)</small></label>
+        <input type="text" id="tSubtask" placeholder="Optional subtask detail…"
+               oninput="this.value=this.value.replace(/[^a-zA-Z0-9 ]/g,'')"
+               onpaste="setTimeout(()=>this.value=this.value.replace(/[^a-zA-Z0-9 ]/g,''),0)">
+        <div id="tSubtaskErr" style="display:none;font-size:.72rem;color:var(--red);margin-top:3px">⚠ Only letters, numbers and spaces allowed</div>
+      </div>
+      <div class="fr">
+        <div class="fg"><label>Assigned To *</label><select id="tAssignee"><option value="">— Select —</option></select></div>
+        <div class="fg"><label>Priority</label>
+          <select id="tPri"><option value="low">Low</option><option value="medium" selected>Medium</option><option value="high">High</option><option value="critical">Critical</option></select>
+        </div>
+      </div>
+      <div class="fr">
+        <div class="fg"><label>Turnaround Time (mins) *</label><input type="number" id="tTAT" placeholder="e.g. 60" min="1" max="99999"></div>
+        <div class="fg"><label>Volume</label><input type="number" id="tVol" value="1" min="1"></div>
+      </div>
+      <div class="fr">
+        <div class="fg"><label>Start Date *</label><input type="date" id="tStarted"><div style="margin-top:4px;font-size:.7rem;color:var(--muted)">Auto-sets on → In Progress</div></div>
+        <div class="fg"><label>Due Date *</label><input type="date" id="tDue"></div>
+      </div>
+      <div class="fg"><label>Status</label>
+        <select id="tStat"><option value="pending">Pending</option><option value="in_progress">In Progress</option><option value="review">Review</option><option value="done">Done</option><option value="blocked">Blocked</option></select>
+      </div>
+      <div class="fg"><label>Notes</label><textarea id="tNotes" placeholder="Additional context…"></textarea></div>
+      <div class="ma">
+        <button class="btn btn-outline" onclick="closeModal('mTask')">Cancel</button>
+        <button class="btn btn-gold" onclick="saveTask()">Save Task</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- DETAIL MODAL -->
+<div class="overlay" id="mDetail">
+  <div class="modal modal-lg">
+    <div class="mh"><span class="mt">Task Details</span><button class="mc" onclick="closeModal('mDetail')">&#215;</button></div>
+    <div class="mb" id="mDetailBody"></div>
+  </div>
+</div>
+
+<!-- IMPORT MODAL -->
+<div class="overlay" id="mImport">
+  <div class="modal modal-lg">
+    <div class="mh"><span class="mt">⬆ Import Tasks from Excel</span><button class="mc" onclick="closeModal('mImport');resetImport()">&#215;</button></div>
+    <div class="mb">
+      <p style="font-size:.83rem;color:var(--muted);margin-bottom:10px">Upload the Task Names template or full Tasks template. Format is detected automatically.
+        <button class="btn btn-outline btn-sm" onclick="downloadTemplate()" style="margin-left:6px">📋 Download Template</button>
+      </p>
+      <div id="impModeTag" style="display:none;margin-bottom:10px;padding:6px 12px;border-radius:6px;font-size:.78rem;font-weight:600;"></div>
+      <div class="drop-zone" id="dropZone" onclick="el('fileInput').click()">
+        <div style="font-size:2rem">📂</div><p>Click or drag &amp; drop your .xlsx file here</p>
+      </div>
+      <input type="file" id="fileInput" accept=".xlsx,.xls" style="display:none" onchange="handleFile(this.files[0])">
+      <div id="impPreview" style="display:none">
+        <div style="font-size:.8rem;color:var(--muted);margin-bottom:6px" id="impPreviewLabel"></div>
+        <div class="prev-wrap"><table style="width:100%;font-size:.75rem"><thead><tr id="impTHead" style="background:#f9f8f5"></tr></thead><tbody id="impTBody"></tbody></table></div>
+        <div id="impResult" style="display:none;padding:10px 14px;border-radius:8px;font-size:.83rem;margin-bottom:10px;"></div>
+        <div class="ma">
+          <button class="btn btn-outline" onclick="resetImport()">Clear</button>
+          <button class="btn btn-green" id="bConfirmImport" onclick="confirmImport()">✓ Import All Rows</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+// =============================================================================
+// HUDDLE PORTAL — CLIENT-SIDE JAVASCRIPT
+// =============================================================================
+
+/* ── XSS helper ─────────────────────────────────────────────────────────────
+   Always call escHtml() on any server-supplied string before inserting it
+   into innerHTML.  This is the primary client-side XSS defence.
+──────────────────────────────────────────────────────────────────────────── */
+function escHtml(s){if(s==null)return'';return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');}
+
+/* ── Constants ───────────────────────────────────────────────────────────────
+   Read from Jinja-injected <meta> tags so server values are available to JS
+   without an extra API round-trip on page load.
+──────────────────────────────────────────────────────────────────────────── */
+const USER_ID   = parseInt(document.querySelector('meta[name="user-id"]').content||'0');
+const USER_ROLE = document.querySelector('meta[name="user-role"]').content||'member';
+const CAN_ALL   = USER_ROLE==='admin'||USER_ROLE==='lead';   // admin/lead capabilities flag
+const CSRF      = ()=>document.querySelector('meta[name="csrf-token"]').content||'';
+
+/* ── Global state ────────────────────────────────────────────────────────────
+   All arrays are fetched once and cached; SSE events patch them in place.
+   allTasks      — full task list from GET /api/tasks
+   visibleTasks  — filtered + sorted subset of allTasks (rendered to table/kanban)
+   allProjects   — projects for the New/Edit Task dropdowns
+   allUsers      — users for the assignment dropdown (admins/leads see all)
+   allTN         — task-name lookup rows for the task-name + cap-timing dropdowns
+   sortCol       — currently sorted column key (default: 'created_at')
+   sortDir       — 1 = asc, -1 = desc
+   selectedIds   — Set of task IDs checked for bulk actions
+   currentView   — 'table' | 'kanban'
+   importMode    — 'full' | 'process' detected from xlsx column headers
+   dragId        — ID of the task card currently being dragged in kanban
+──────────────────────────────────────────────────────────────────────────── */
+let allTasks=[],visibleTasks=[],allProjects=[],allUsers=[],allTN=[];
+let sortCol='created_at',sortDir=-1;
+let selectedIds=new Set();
+let currentView='table';
+let impHeaderMap=[],importRows=[],importMode='full';
+let dragId=null;
+
+/* ── Shared helpers ──────────────────────────────────────────────────────────
+   el(id)              — getElementById shorthand
+   val(id)             — safe value getter (returns '' if element missing)
+   toast(msg, type)    — 3-second notification bar
+   openModal / closeModal — show/hide overlay modals
+   bdg(v)              — coloured status/priority badge span
+   api(url,method,body)— CSRF-aware fetch wrapper; returns raw Response
+──────────────────────────────────────────────────────────────────────────── */
+const el=id=>document.getElementById(id);
+const val=id=>el(id)?el(id).value:'';
+function toast(msg,type='success'){
+  const t=el('toast');t.textContent=(type==='success'?'✅ ':'❌ ')+msg;
+  t.className='toast show';setTimeout(()=>t.className='toast',3400);
+}
+function openModal(id){
+  const ov=el(id);ov.classList.add('open');
+  const box=ov.querySelector('.modal');
+  if(box&&!box._sp){box.addEventListener('mousedown',e=>e.stopPropagation());box._sp=true;}
+}
+function closeModal(id){el(id).classList.remove('open');}
+function bdg(v){return`<span class="badge badge-${v||'pending'}">${(v||'pending').replace('_',' ')}</span>`;}
+async function api(url,method='GET',body=null){
+  const o={method,headers:{'Content-Type':'application/json','X-CSRF-Token':CSRF()}};
+  if(body)o.body=JSON.stringify(body);
+  return fetch(url,o);
+}
+
+/* ── URL filter persistence ──────────────────────────────────────────────────
+   Filter state is encoded into the URL query string so the current filter set
+   survives F5 page refreshes and can be shared or bookmarked.
+
+   F2P maps input element IDs → URL param names.
+   saveURL()  — writes current filter values into history.replaceState
+   loadURL()  — on page load, reads URL params back into filter inputs
+──────────────────────────────────────────────────────────────────────────── */
+const F2P={gSearch:'q',cf_study_id:'study',cf_sr_rfc:'sr',cf_process:'proc',
+  cf_task_name:'task',cf_subtask:'sub',cf_assignee:'asn',cf_ent_id:'eid',
+  cf_tat:'tat',cf_vol:'vol',cf_started:'start',cf_due:'due',
+  cf_status:'st',cf_priority:'pri'};
+
+function saveURL(){
+  const p=new URLSearchParams();
+  Object.entries(F2P).forEach(([id,k])=>{const v=val(id);if(v)p.set(k,v);});
+  if(currentView==='kanban')p.set('view','kanban');
+  history.replaceState(null,'',p.toString()?location.pathname+'?'+p:location.pathname);
+}
+function loadURL(){
+  const p=new URLSearchParams(location.search);
+  Object.entries(F2P).forEach(([id,k])=>{const v=p.get(k);if(v&&el(id))el(id).value=v;});
+  if(p.get('view')==='kanban')setView('kanban',true);
+}
+
+/* ── View toggle (table ↔ kanban) ────────────────────────────────────────────
+   setView(v) — switch between 'table' and 'kanban', update nav buttons,
+                persist the choice to URL params, then re-render the active view.
+──────────────────────────────────────────────────────────────────────────── */
+function setView(v,noSave=false){
+  currentView=v;
+  el('tableView').style.display=v==='table'?'':'none';
+  el('kanbanView').classList.toggle('on',v==='kanban');
+  el('vtTable').classList.toggle('active',v==='table');
+  el('vtKanban').classList.toggle('active',v==='kanban');
+  if(v==='kanban')renderKanban();
+  if(!noSave)saveURL();
+}
+
+/* ── Initialisation ──────────────────────────────────────────────────────────
+   init()       — bootstraps the portal on DOMContentLoaded:
+                  loads URL params, fires parallel data fetches, starts SSE + clock.
+   refreshAll() — re-fetches tasks and stats (called after any mutation).
+──────────────────────────────────────────────────────────────────────────── */
+async function init(){
+  try{
+    const [prR,usR,tnR,pcR]=await Promise.all([api('/api/projects'),api('/api/users'),api('/api/task-names'),api('/api/processes')]);
+    const [pr,us,tnRaw,pcData]=await Promise.all([prR.json(),usR.json(),tnR.json(),pcR.json()]);
+    allProjects=Array.isArray(pr)?pr:[];
+    allUsers=Array.isArray(us)?us:[];
+    const tnList=Array.isArray(tnRaw)?tnRaw:[];
+    const pcList=Array.isArray(pcData)?pcData:[];
+    const uOpts=allUsers.map(u=>`<option value="${u.id}">${escHtml(u.username)} (${escHtml(u.enterprise_id)})</option>`).join('');
+    if(el('tAssignee'))el('tAssignee').innerHTML='<option value="">— Select —</option>'+uOpts;
+    if(el('cf_assignee'))el('cf_assignee').innerHTML='<option value="">All</option>'+allUsers.map(u=>`<option value="${escHtml(u.username)}">${escHtml(u.username)}</option>`).join('');
+    if(el('bkAssignee'))el('bkAssignee').innerHTML='<option value="">Reassign…</option>'+uOpts;
+    allTN=tnList.filter(t=>t.status==='active');
+    const seen=new Set(); const procs=[];
+    pcList.forEach(p=>{if(p.name&&!seen.has(p.name.toLowerCase())){seen.add(p.name.toLowerCase());procs.push(p.name);}});
+    allTN.forEach(t=>{if(t.process&&!seen.has(t.process.toLowerCase())){seen.add(t.process.toLowerCase());procs.push(t.process);}});
+    procs.sort((a,b)=>a.localeCompare(b));
+    const pOpts='<option value="">— Select —</option>'+procs.map(p=>`<option value="${escHtml(p)}">${escHtml(p)}</option>`).join('');
+    if(el('tProcess'))el('tProcess').innerHTML=pOpts;
+    if(el('cf_process'))el('cf_process').innerHTML='<option value="">All Mapping Processes</option>'+procs.map(p=>`<option value="${escHtml(p)}">${escHtml(p)}</option>`).join('');
+    buildTNDropdown('');
+  }catch(e){toast('Failed to load master data','error');console.error('init error:',e);}
+  loadURL();
+  await Promise.all([loadTasks(),loadStats()]);
+  setupDZ();
+  initKB();
+  initSSE();
+}
+
+async function refreshAll(){
+  toast('Refreshing…');
+  await Promise.all([loadTasks(),loadStats()]);
+}
+
+/* ── Stats cards ─────────────────────────────────────────────────────────────
+   loadStats() — GET /api/analytics → update the 4 stat cards above the task table.
+   quickF(s)   — set the status filter pill and refresh (used by stat card clicks).
+──────────────────────────────────────────────────────────────────────────── */
+async function loadStats(){
+  try{
+    const r=await api('/api/analytics');
+    if(!r.ok)return;
+    const d=await r.json();
+    const sf=val('cf_status');
+    el('qStats').innerHTML=[
+      {l:'Total',v:d.total_tasks||0,c:'--gold',s:''},
+      {l:'Pending',v:d.pending_tasks||0,c:'--yellow',s:'pending'},
+      {l:'In Progress',v:d.in_progress||0,c:'--blue',s:'in_progress'},
+      {l:'Done',v:d.done_tasks||0,c:'--green',s:'done'},
+      {l:'Blocked',v:d.blocked||0,c:'--red',s:'blocked'},
+    ].map(({l,v,c,s})=>`<div class="qcard${sf===s&&s?' qf-active':''}" style="--c:var(${c})"
+      onclick="${s?`quickF('${s}')`:'quickFClear()'}" title="${s?'Filter: '+l:'Show all'}">
+      <div class="qv">${v}</div><div class="ql">${l}</div></div>`).join('');
+    const sbStats=el('sbStats');
+    if(sbStats)sbStats.innerHTML=[['Total',d.total_tasks||0],['Done',d.done_tasks||0],['Volume',d.total_volume||0]]
+      .map(([l,v])=>`<div class="sb-stat"><span>${l}</span><strong>${v}</strong></div>`).join('');
+  }catch(e){console.error('loadStats error:',e);}
+}
+function quickF(s){el('cf_status').value=s;applyFilters();loadStats();}
+function quickFClear(){el('cf_status').value='';applyFilters();loadStats();}
+
+/* ── Load tasks ──────────────────────────────────────────────────────────────
+   loadTasks() — GET /api/tasks → allTasks; then applyFilters() + renderRows().
+   Members only see tasks assigned to or created by them (enforced server-side).
+──────────────────────────────────────────────────────────────────────────── */
+async function loadTasks(){
+  try{allTasks=await(await api('/api/tasks')).json();applyFilters();}
+  catch(e){toast('Could not load tasks','error');}
+}
+
+/* ── Filters ─────────────────────────────────────────────────────────────────
+   applyFilters() — reads all filter inputs, reduces allTasks → visibleTasks,
+                   calls doSort() to apply current sort, then renderRows().
+   clearAllFilters() — resets every filter input and refreshes.
+   Filter inputs: global search, study ID, SR/RFC, process, task name,
+                  sub-task, assignee, enterprise ID, status, priority,
+                  date range (from/to), and overdue-only checkbox.
+──────────────────────────────────────────────────────────────────────────── */
+function applyFilters(){
+  const gs=val('gSearch').toLowerCase().trim();
+  const f={
+    study_id:val('cf_study_id').toLowerCase(),sr_rfc:val('cf_sr_rfc').toLowerCase(),
+    process:val('cf_process'),task_name:val('cf_task_name').toLowerCase(),
+    subtask:val('cf_subtask').toLowerCase(),assignee:val('cf_assignee'),
+    eid:val('cf_ent_id').toLowerCase(),tat:val('cf_tat'),vol:val('cf_vol'),
+    started:val('cf_started'),due:val('cf_due'),status:val('cf_status'),priority:val('cf_priority'),
+  };
+  const hasF=gs||Object.values(f).some(v=>v);
+  el('btnClearAll').style.display=hasF?'':'none';
+  visibleTasks=allTasks.filter(t=>{
+    if(gs&&!`${t.study_id} ${t.sr_rfc} ${t.task_name||''} ${t.assignee_name||''}`.toLowerCase().includes(gs))return false;
+    if(f.study_id&&!t.study_id.toLowerCase().includes(f.study_id))return false;
+    if(f.sr_rfc&&!t.sr_rfc.toLowerCase().includes(f.sr_rfc))return false;
+    if(f.process&&t.process!==f.process)return false;
+    if(f.task_name&&!(t.task_name||'').toLowerCase().includes(f.task_name))return false;
+    if(f.subtask&&!(t.subtask||'').toLowerCase().includes(f.subtask))return false;
+    if(f.assignee&&t.assignee_name!==f.assignee)return false;
+    if(f.eid&&!(t.enterprise_id||'').toLowerCase().includes(f.eid))return false;
+    if(f.tat&&!(t.turnaround_time!=null&&t.turnaround_time<=+f.tat))return false;
+    if(f.vol&&!(t.volume>=+f.vol))return false;
+    if(f.started&&!(t.started_at||'').startsWith(f.started))return false;
+    if(f.due&&t.due_date!==f.due)return false;
+    if(f.status&&t.status!==f.status)return false;
+    if(f.priority&&t.priority!==f.priority)return false;
+    return true;
+  });
+  doSort();renderRows();renderPills(gs,f);saveURL();
+  if(currentView==='kanban')renderKanban();
+}
+function clearAllFilters(){
+  el('gSearch').value='';
+  Object.keys(F2P).forEach(id=>{if(el(id))el(id).value='';});
+  applyFilters();loadStats();
+}
+
+/* ── Sort ── */
+function sortBy(col){
+  sortDir=sortCol===col?-sortDir:1;sortCol=col;
+  document.querySelectorAll('thead tr.th-lbl th').forEach(th=>{
+    th.classList.remove('sort-asc','sort-desc');
+    if(th.dataset.col===col)th.classList.add(sortDir===1?'sort-asc':'sort-desc');
+  });
+  doSort();renderRows();
+}
+function doSort(){
+  visibleTasks.sort((a,b)=>{
+    const av=a[sortCol]??'',bv=b[sortCol]??'';
+    return typeof av==='number'?(av-bv)*sortDir:String(av).localeCompare(String(bv))*sortDir;
+  });
+}
+
+/* ── Render table ────────────────────────────────────────────────────────────
+   renderRows() — builds the task table tbody from visibleTasks[].
+   AV_COLS      — avatar background colours (cycled by user ID mod length).
+   PRI_C        — priority colour map for the priority dot indicator.
+   STATUSES / PRIORITIES — valid enum values used by inline dropdowns.
+──────────────────────────────────────────────────────────────────────────── */
+const AV_COLS=['#ff4d2e','#22c55e','#3b82f6','#a855f7','#eab308','#f97316','#06b6d4','#ec4899'];
+const PRI_C={low:'#94a3b8',medium:'#eab308',high:'#f97316',critical:'#ef4444'};
+const STATUSES=['pending','in_progress','review','done','blocked'];
+const PRIORITIES=['low','medium','high','critical'];
+
+function renderRows(){
+  el('tCount').textContent=`${visibleTasks.length} of ${allTasks.length} tasks`;
+  const tb=el('tBody');
+  if(!visibleTasks.length){
+    tb.innerHTML='<tr><td colspan="15"><div class="empty"><div class="ei">🔍</div>No tasks match filters</div></td></tr>';
+    return;
+  }
+  tb.innerHTML=visibleTasks.map(t=>{
+    const sd=t.started_at?t.started_at.split(' ')[0]:'—';
+    const own=t.assigned_to===USER_ID||t.created_by_id===USER_ID;
+    const canEdit=CAN_ALL||own;
+    const canDel=CAN_ALL||t.created_by_id===USER_ID;
+    const sel=selectedIds.has(t.id);
+    return`<tr class="${sel?'sel-row':''}" data-id="${t.id}">
+<td style="padding:9px 6px 9px 12px"><input type="checkbox" class="rcb" data-id="${t.id}" ${sel?'checked':''} onchange="toggleRow(${t.id},this.checked)" style="cursor:pointer"></td>
+<td><span class="mono">${escHtml(t.study_id)}</span></td>
+<td><span class="mono">${escHtml(t.sr_rfc)}</span></td>
+<td style="font-size:.79rem">${escHtml(t.process)||'—'}</td>
+<td style="max-width:150px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:500" title="${escHtml(t.task_name)}">${escHtml(t.task_name)}</td>
+<td style="max-width:100px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--muted);font-size:.79rem">${escHtml(t.subtask)||'—'}</td>
+<td style="white-space:nowrap">${escHtml(t.assignee_name)}</td>
+<td><span class="mono" style="color:var(--muted)">${escHtml(t.enterprise_id)||'—'}</span></td>
+<td style="text-align:center">${t.turnaround_time??'—'}</td>
+<td style="text-align:center">${t.volume}</td>
+<td style="color:var(--muted);font-size:.79rem;white-space:nowrap">${sd}</td>
+<td style="color:var(--muted);font-size:.79rem;white-space:nowrap">${t.due_date||'—'}</td>
+<td>${canEdit?`<select class="il-sel" data-id="${t.id}" data-f="status" onchange="inlineSave(${t.id},'status',this.value)">${STATUSES.map(s=>`<option value="${s}"${t.status===s?' selected':''}>${s.replace('_',' ')}</option>`).join('')}</select>`:bdg(t.status)}</td>
+<td>${canEdit?`<select class="il-sel" data-id="${t.id}" data-f="priority" onchange="inlineSave(${t.id},'priority',this.value)">${PRIORITIES.map(p=>`<option value="${p}"${t.priority===p?' selected':''}>${p}</option>`).join('')}</select>`:bdg(t.priority)}</td>
+<td style="white-space:nowrap;min-width:150px">
+  <button class="btn btn-outline btn-sm" onclick="viewTask(${t.id})" title="View" style="padding:5px 8px">👁</button>
+  ${canEdit?`<button class="btn btn-outline btn-sm" onclick="editTask(${t.id})">✏️ Edit</button>`:''}
+  ${canDel?`<button class="btn btn-danger btn-sm" onclick="delTask(${t.id})">🗑</button>`:''}
+</td></tr>`;
+  }).join('');
+  // sync select-all
+  const cbs=tb.querySelectorAll('.rcb');
+  if(el('selAll'))el('selAll').checked=cbs.length>0&&[...cbs].every(c=>c.checked);
+}
+
+/* ── Inline save ─────────────────────────────────────────────────────────────
+   inlineSave(id, field, value) — immediately PUT a single field change
+   (status or priority) when a table row dropdown changes value.
+   Patches allTasks[] in memory on success to avoid a full reload.
+   BUG-FIX-4: after a status change to 'done', a completion email is now
+   triggered server-side so members are notified inline as well as via bulk.
+──────────────────────────────────────────────────────────────────────────── */
+async function inlineSave(id,field,value){
+  const task=allTasks.find(t=>t.id===id);
+  if(!task||task[field]===value)return;
+  const old=task[field];
+  task[field]=value; // optimistic
+  renderRows();
+  if(currentView==='kanban')renderKanban();
+  try{
+    const res=await api(`/api/tasks/${id}`,'PUT',{[field]:value});
+    if(res.ok){
+      const upd=await res.json();
+      const i=allTasks.findIndex(t=>t.id===id);
+      if(i>=0)allTasks[i]=upd;
+      applyFilters();
+    }else{
+      task[field]=old;
+      const d=await res.json();
+      toast(d.error||'Update failed','error');
+      renderRows();
+    }
+  }catch{task[field]=old;toast('Network error','error');renderRows();}
+}
+
+/* ── Selection & bulk actions ────────────────────────────────────────────────
+   selectedIds   — Set of task IDs with checked checkboxes.
+   toggleRow()   — add/remove an ID from selectedIds; refresh bulk bar.
+   selAllRows()  — check/uncheck all visible rows.
+   clearSel()    — clear selection and re-render.
+   updateBulkBar()   — show/hide the bulk action toolbar and update count label.
+   bulkAction()  — PUT status/priority/assignee on all selectedIds via /api/tasks/bulk.
+   bulkDelete()  — DELETE all selectedIds via /api/tasks/bulk-delete (with confirm).
+──────────────────────────────────────────────────────────────────────────── */
+function toggleRow(id,checked){
+  checked?selectedIds.add(id):selectedIds.delete(id);
+  updateBulkBar();
+  const row=document.querySelector(`tr[data-id="${id}"]`);
+  if(row)row.classList.toggle('sel-row',checked);
+}
+function selAllRows(checked){
+  visibleTasks.forEach(t=>checked?selectedIds.add(t.id):selectedIds.delete(t.id));
+  updateBulkBar();renderRows();
+}
+function clearSel(){selectedIds.clear();updateBulkBar();renderRows();}
+function updateBulkBar(){
+  const n=selectedIds.size;
+  el('bulkBar').classList.toggle('on',n>0);
+  el('bulkCount').textContent=`${n} task${n!==1?'s':''} selected`;
+}
+
+async function bulkAction(field,sel){
+  const v=sel.value; sel.value='';
+  if(!v||!selectedIds.size)return;
+  const body={ids:[...selectedIds],[field]:field==='assigned_to'?parseInt(v):v};
+  try{
+    const res=await api('/api/tasks/bulk','POST',body);
+    if(res.ok){
+      const d=await res.json();
+      toast(`Updated ${d.updated} task${d.updated!==1?'s':''}${d.skipped?` (${d.skipped} skipped)`:''}`);
+      selectedIds.clear();
+      await Promise.all([loadTasks(),loadStats()]);
+    }else{const d=await res.json();toast(d.error||'Bulk update failed','error');}
+  }catch{toast('Network error','error');}
+}
+async function bulkDelete(){
+  const n=selectedIds.size;
+  if(!n)return;
+  if(!confirm(`Delete ${n} task${n!==1?'s':''}? This cannot be undone.`))return;
+  try{
+    const res=await api('/api/tasks/bulk-delete','POST',{ids:[...selectedIds]});
+    if(res.ok){
+      const d=await res.json();
+      toast(`Deleted ${d.deleted} task${d.deleted!==1?'s':''}`);
+      selectedIds.clear();
+      await Promise.all([loadTasks(),loadStats()]);
+    }else{const d=await res.json();toast(d.error||'Delete failed','error');}
+  }catch{toast('Network error','error');}
+}
+
+/* ── Active filter pills ─────────────────────────────────────────────────────
+   renderPills(gs, filters) — display a row of removable pill badges summarising
+   every active filter so users can see and clear individual filters at a glance.
+   mkPill(label, value, cb) — build a single pill element with an × remove button.
+──────────────────────────────────────────────────────────────────────────── */
+const PLBL={study_id:'Study ID',sr_rfc:'SR/RFC',process:'Process',task_name:'Task',subtask:'Sub Task',
+  assignee:'Assignee',eid:'Ent ID',tat:'TAT ≤',vol:'Vol ≥',started:'Start',due:'Due',status:'Status',priority:'Priority'};
+const FMAP={study_id:'cf_study_id',sr_rfc:'cf_sr_rfc',process:'cf_process',task_name:'cf_task_name',
+  subtask:'cf_subtask',assignee:'cf_assignee',eid:'cf_ent_id',tat:'cf_tat',vol:'cf_vol',
+  started:'cf_started',due:'cf_due',status:'cf_status',priority:'cf_priority'};
+function renderPills(gs,f){
+  let h='';
+  if(gs)h+=mkPill('Search',gs,()=>{el('gSearch').value='';applyFilters();});
+  for(const[k,v]of Object.entries(f))if(v)h+=mkPill(PLBL[k]||k,v,()=>{if(FMAP[k])el(FMAP[k]).value='';applyFilters();});
+  el('activePills').innerHTML=h;
+}
+function mkPill(label,value,cb){
+  const key=`_p${Math.random().toString(36).slice(2)}`;window[key]=cb;
+  return`<span class="pill"><b>${label}:</b>&nbsp;${value}<button class="pill-x" onclick="window['${key}']()" title="Remove">✕</button></span>`;
+}
+
+/* ── Kanban board ────────────────────────────────────────────────────────────
+   Drag-and-drop board view grouped by the 5 status columns.
+
+   KCOLS       — ordered column definitions [{status, label, colour}]
+   renderKanban() — build all column HTML from visibleTasks[]
+   kCard(t)    — render a single draggable task card
+   kStart/kEnd/kOver/kLeave/kDrop — HTML5 drag events:
+     kDrop(e, status) — PUT task.status = dropped column status via inlineSave()
+──────────────────────────────────────────────────────────────────────────── */
+const KCOLS=[
+  {k:'pending',    l:'Pending',     c:'#eab308'},
+  {k:'in_progress',l:'In Progress', c:'#3b82f6'},
+  {k:'review',     l:'Review',      c:'#a855f7'},
+  {k:'done',       l:'Done',        c:'#22c55e'},
+  {k:'blocked',    l:'Blocked',     c:'#ef4444'},
+];
+function renderKanban(){
+  const board=el('kanbanView');
+  const grp={};KCOLS.forEach(c=>grp[c.k]=[]);
+  visibleTasks.forEach(t=>{if(grp[t.status])grp[t.status].push(t);});
+  board.innerHTML=KCOLS.map(col=>{
+    const cards=grp[col.k];
+    return`<div class="k-col" data-status="${col.k}"
+      ondragover="kOver(event,this)" ondragleave="kLeave(event,this)" ondrop="kDrop(event,'${col.k}')">
+      <div class="k-hdr"><div class="k-dot" style="background:${col.c}"></div><span class="k-title">${col.l}</span><span class="k-cnt">${cards.length}</span></div>
+      <div class="k-cards">${cards.length?cards.map(t=>kCard(t)).join(''):'<div class="k-empty">Drop tasks here</div>'}</div>
+    </div>`;
+  }).join('');
+}
+function kCard(t){
+  const ai=allUsers.findIndex(u=>u.id===t.assigned_to);
+  const ac=AV_COLS[(ai<0?0:ai)%AV_COLS.length];
+  const ini=t.assignee_name?t.assignee_name[0].toUpperCase():'?';
+  const canDrag=CAN_ALL||t.assigned_to===USER_ID||t.created_by_id===USER_ID;
+  return`<div class="k-card" draggable="${canDrag}" data-id="${t.id}"
+    ondragstart="kStart(event,${t.id})" ondragend="kEnd()"
+    onclick="viewTask(${t.id})" title="Click to view details">
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:6px;margin-bottom:5px">
+      <div class="k-name">${escHtml(t.task_name)}</div>
+      <div class="k-pri" style="background:${PRI_C[t.priority]||'#aaa'};margin-top:3px;flex-shrink:0" title="${t.priority}"></div>
+    </div>
+    <div class="k-meta">
+      <div class="k-row">
+        <span style="display:flex;align-items:center;gap:4px">
+          <span class="k-av" style="background:${ac}">${ini}</span>
+          ${escHtml(t.assignee_name||'Unassigned')}
+        </span>
+      </div>
+      <div class="k-row">
+        <span class="mono" style="font-size:.68rem;color:var(--muted)">${escHtml(t.study_id)}</span>
+        ${t.due_date?`<span style="font-size:.68rem;color:var(--muted)">📅 ${t.due_date}</span>`:''}
+      </div>
+    </div>
+  </div>`;
+}
+function kStart(e,id){dragId=id;setTimeout(()=>{const c=document.querySelector(`.k-card[data-id="${id}"]`);if(c)c.classList.add('dragging');},0);}
+function kEnd(){document.querySelectorAll('.k-card.dragging').forEach(c=>c.classList.remove('dragging'));document.querySelectorAll('.k-col.drop-over').forEach(c=>c.classList.remove('drop-over'));dragId=null;}
+function kOver(e,col){e.preventDefault();col.classList.add('drop-over');}
+function kLeave(e,col){if(!col.contains(e.relatedTarget))col.classList.remove('drop-over');}
+async function kDrop(e,status){
+  e.preventDefault();
+  document.querySelectorAll('.k-col.drop-over').forEach(c=>c.classList.remove('drop-over'));
+  if(!dragId)return;
+  const t=allTasks.find(x=>x.id===dragId);
+  if(t&&t.status!==status)await inlineSave(dragId,'status',status);
+}
+
+/* ── View task detail ────────────────────────────────────────────────────────
+   viewTask(id) — open the read-only task detail modal with two tabs:
+     Info tab    — all task fields, formatted dates, TAT, project, assignee.
+     History tab — audit log loaded lazily from GET /api/tasks/<id>/audit.
+
+   showDetailTab(tab) — switch between 'info' and 'history' tabs.
+   _loadAudit(taskId) — fetches audit log and renders a timeline of changes.
+──────────────────────────────────────────────────────────────────────────── */
+function viewTask(id){
+  const t=allTasks.find(x=>x.id===id);if(!t)return;
+  const sd=t.started_at?t.started_at.split(' ')[0]:'—';
+  const canEdit=CAN_ALL||t.assigned_to===USER_ID||t.created_by_id===USER_ID;
+  el('mDetailBody').innerHTML=`
+    <div class="detail-tabs">
+      <button class="dtab active" id="dtabInfo"   onclick="showDetailTab('info')">📋 Details</button>
+      <button class="dtab"        id="dtabAudit"  onclick="showDetailTab('audit')">🕐 History</button>
+    </div>
+    <div id="dtabInfoPane">
+      <div class="dg">
+        <div class="df"><label>Study ID</label><span class="mono">${escHtml(t.study_id)}</span></div>
+        <div class="df"><label>SR / RFC</label><span class="mono">${escHtml(t.sr_rfc)}</span></div>
+        <div class="df"><label>Assignee</label>${escHtml(t.assignee_name)}${t.enterprise_id?` <span class="mono" style="color:var(--muted)">· ${escHtml(t.enterprise_id)}</span>`:''}</div>
+        <div class="df"><label>Status</label>${bdg(t.status)}</div>
+        <div class="df"><label>Priority</label>${bdg(t.priority)}</div>
+        <div class="df"><label>TAT (mins)</label>${t.turnaround_time||'—'}</div>
+        <div class="df"><label>Volume</label>${t.volume}</div>
+        <div class="df"><label>Start Date</label>${sd}</div>
+        <div class="df"><label>Due Date</label>${t.due_date||'—'}</div>
+        <div class="df"><label>Created</label>${t.created_at}</div>
+      </div>
+      <div style="margin-bottom:11px"><label style="font-size:.67rem;color:var(--muted);text-transform:uppercase;letter-spacing:.8px;display:block;margin-bottom:3px">Task Name</label><strong>${escHtml(t.task_name)}</strong></div>
+      ${t.process?`<div style="margin-bottom:11px"><label style="font-size:.67rem;color:var(--muted);text-transform:uppercase;letter-spacing:.8px;display:block;margin-bottom:3px">Mapping Process</label>${escHtml(t.process)}</div>`:''}
+      ${t.subtask?`<div style="margin-bottom:11px"><label style="font-size:.67rem;color:var(--muted);text-transform:uppercase;letter-spacing:.8px;display:block;margin-bottom:3px">Sub Task</label>${escHtml(t.subtask)}</div>`:''}
+      ${t.notes?`<div style="margin-bottom:11px"><label style="font-size:.67rem;color:var(--muted);text-transform:uppercase;letter-spacing:.8px;display:block;margin-bottom:3px">Notes</label><span style="color:var(--muted)">${escHtml(t.notes)}</span></div>`:''}
+    </div>
+    <div id="dtabAuditPane" style="display:none">
+      <div id="auditLog" style="min-height:60px"><div class="empty" style="padding:20px"><div class="ei" style="font-size:1.5rem">⏳</div>Loading history…</div></div>
+    </div>
+    <div class="ma">
+      <button class="btn btn-outline" onclick="closeModal('mDetail')">Close</button>
+      ${canEdit?`<button class="btn btn-gold" onclick="closeModal('mDetail');editTask(${t.id})">✏️ Edit Task</button>`:''}
+    </div>`;
+  openModal('mDetail');
+  // Pre-load audit in background
+  _loadAudit(id);
+}
+
+function showDetailTab(tab){
+  el('dtabInfoPane').style.display=tab==='info'?'':'none';
+  el('dtabAuditPane').style.display=tab==='audit'?'':'none';
+  el('dtabInfo').classList.toggle('active',tab==='info');
+  el('dtabAudit').classList.toggle('active',tab==='audit');
+}
+
+async function _loadAudit(taskId){
+  try{
+    const res=await api(`/api/tasks/${taskId}/audit`);
+    const logs=await res.json();
+    const box=el('auditLog');if(!box)return;
+    if(!logs.length){box.innerHTML='<div class="empty" style="padding:20px"><div class="ei" style="font-size:1.5rem">📭</div>No changes recorded yet</div>';return;}
+    const FIELD_ICONS={status:'🔄',priority:'🎯',assigned_to:'👤',task_name:'📝',process:'⚙️',subtask:'🔖',notes:'📋',due_date:'📅',started_at:'▶️',volume:'📦',turnaround_time:'⏱'};
+    box.innerHTML=logs.map(l=>`
+      <div class="audit-row">
+        <span class="audit-time">${escHtml(l.changed_at)}</span>
+        <span class="audit-who">${escHtml(l.changed_by)}</span>
+        <span class="audit-field">${FIELD_ICONS[l.field]||'✏️'} ${escHtml(l.field.replace('_',' '))}</span>
+        <span class="audit-arrow">→</span>
+        <span class="audit-val">
+          ${l.old_value?`<span style="text-decoration:line-through;color:var(--muted);margin-right:4px">${escHtml(l.old_value)}</span>`:''}
+          <strong>${escHtml(l.new_value||'—')}</strong>
+        </span>
+      </div>`).join('');
+  }catch{const b=el('auditLog');if(b)b.innerHTML='<div style="color:var(--muted);font-size:.8rem;padding:12px">Could not load history</div>';}
+}
+
+/* ── New / edit task ─────────────────────────────────────────────────────────
+   openNewTask() — open the create modal with empty fields and today's date.
+   editTask(id)  — open the edit modal pre-populated from the allTasks cache.
+   saveTask()    — POST (new) or PUT (edit) the task form fields.
+   delTask(id)   — DELETE with confirmation prompt.
+
+   Task Name dropdown helpers:
+     buildTNDropdown(proc)  — populate the task-name <select> for a given process.
+     filterTNByProcess()    — called when the process dropdown changes.
+     onTNSelect()           — auto-fill the cap-timing badge when a task name is chosen.
+     resetCap()             — clear the cap badge back to placeholder state.
+──────────────────────────────────────────────────────────────────────────── */
+function openNewTask(){
+  el('eTaskId').value='';el('mTaskTitle').textContent='New Task';
+  el('studyIdRow').style.display='block';el('tStudyId').style.display='';el('tStudyId').value='';
+  el('tStudyIdDisplay').style.display='none';
+  ['tSrRfc','tSubtask','tNotes','tStarted','tDue','tTAT'].forEach(id=>el(id).value='');
+  el('tProcess').value='';el('tAssignee').value='';
+  el('tPri').value='medium';el('tVol').value='1';el('tStat').value='pending';
+  buildTNDropdown('');resetCap();openModal('mTask');
+  setTimeout(()=>el('tStudyId').focus(),120);
+}
+function editTask(id){
+  const t=allTasks.find(x=>x.id===id);if(!t)return;
+  el('eTaskId').value=id;el('mTaskTitle').textContent='Edit Task';
+  el('tStudyId').style.display='none';el('tStudyIdDisplay').style.display='';
+  el('tStudyIdDisplay').textContent=t.study_id;
+  el('tSrRfc').value=t.sr_rfc;el('tSubtask').value=t.subtask||'';
+  el('tAssignee').value=t.assigned_to?String(t.assigned_to):'';
+  el('tPri').value=t.priority;el('tTAT').value=t.turnaround_time||'';
+  el('tVol').value=t.volume;el('tStarted').value=t.started_at?t.started_at.split(' ')[0]:'';
+  el('tDue').value=t.due_date||'';el('tStat').value=t.status;el('tNotes').value=t.notes||'';
+  const matched=allTN.find(tn=>tn.task_name===t.task_name);
+  const proc=matched?matched.process:(t.process||'');
+  el('tProcess').value=proc;buildTNDropdown(proc);el('tTaskName').value=t.task_name;onTNSelect();
+  openModal('mTask');
+}
+async function saveTask(){
+  const eid=val('eTaskId'),study_id=val('tStudyId').trim(),sr_rfc=val('tSrRfc').trim();
+  const task_name=val('tTaskName').trim(),process=val('tProcess').trim();
+  const assigned_to=val('tAssignee'),tat=val('tTAT').trim(),started=val('tStarted'),due=val('tDue');
+  if(!eid&&!study_id){toast('Study ID is required','error');return;}
+  if(!process){toast('Mapping Process is required','error');return;}
+  if(!task_name){toast('Task Name is required','error');return;}
+  if(!assigned_to){toast('Assigned To is required','error');return;}
+  if(!tat){toast('Turnaround Time is required','error');return;}
+  if(!started){toast('Start Date is required','error');return;}
+  if(!due){toast('Due Date is required','error');return;}
+  const subtask=val('tSubtask').trim();
+  if(subtask&&/[^a-zA-Z0-9 ]/.test(subtask)){el('tSubtaskErr').style.display='block';toast('Sub Task: letters/numbers only','error');return;}
+  el('tSubtaskErr').style.display='none';
+  const final_sr=sr_rfc||`RFC-${Date.now().toString(36).toUpperCase()}`;
+  const pid=allProjects.length?allProjects[0].id:null;
+  if(!pid){toast('No projects found','error');return;}
+  const body={sr_rfc:final_sr,project_id:pid,task_name,process,subtask,
+    assigned_to:assigned_to||null,priority:val('tPri'),
+    turnaround_time:parseInt(tat)||null,volume:parseInt(val('tVol'))||1,
+    started_at:started||null,due_date:due||null,status:val('tStat'),notes:val('tNotes').trim()};
+  if(!eid)body.study_id=study_id;
+  try{
+    const res=await api(eid?`/api/tasks/${eid}`:'/api/tasks',eid?'PUT':'POST',body);
+    if(res.ok){toast(eid?'Task updated ✓':'Task created ✓');closeModal('mTask');await Promise.all([loadTasks(),loadStats()]);}
+    else{const d=await res.json();toast(d.error||'Save failed','error');}
+  }catch{toast('Network error','error');}
+}
+async function delTask(id){
+  if(!confirm('Delete this task? Cannot be undone.'))return;
+  try{
+    const res=await api(`/api/tasks/${id}`,'DELETE');
+    if(res.ok){toast('Task deleted');await Promise.all([loadTasks(),loadStats()]);}
+    else toast('Delete failed','error');
+  }catch{toast('Network error','error');}
+}
+
+/* ── Task Name helpers ── */
+function buildTNDropdown(proc){
+  const pl=proc?proc.trim().toLowerCase():'';
+  const list=pl?allTN.filter(t=>t.process.trim().toLowerCase()===pl):allTN;
+  const cur=val('tTaskName'),sel=el('tTaskName');
+  sel.innerHTML='<option value="">— Select Task Name —</option>';
+  list.forEach(t=>{
+    const o=document.createElement('option');o.value=t.task_name;
+    o.dataset.cap=t.cap_timing;o.dataset.proc=t.process;
+    o.textContent=`${t.task_name}  (${t.process} · ⏱ ${t.cap_timing} mins)`;
+    if(t.task_name===cur)o.selected=true;
+    sel.appendChild(o);
+  });
+  if(cur)onTNSelect();
+}
+function filterTNByProcess(){buildTNDropdown(val('tProcess'));if(!val('tTaskName'))resetCap();}
+function onTNSelect(){
+  const o=el('tTaskName').options[el('tTaskName').selectedIndex],b=el('capBadge');
+  if(o&&o.dataset.cap){
+    const cap=+o.dataset.cap;b.textContent=`⏱ ${cap} mins`;
+    const[bg,fg,bc]=cap<=30?['#dcfce7','#14532d','#86efac']:cap<=60?['#fefce8','#854d0e','#fde68a']:['#fee2e2','#991b1b','#fca5a5'];
+    Object.assign(b.style,{background:bg,color:fg,borderColor:bc});
+    if(!val('tProcess')&&o.dataset.proc)el('tProcess').value=o.dataset.proc;
+  }else resetCap();
+}
+function resetCap(){const b=el('capBadge');b.textContent='—';Object.assign(b.style,{background:'#f0f9ff',color:'#0369a1',borderColor:'#bae6fd'});}
+
+/* ── Export / Template ── */
+function exportExcel(){if(!allTasks.length){toast('No tasks','error');return;}window.location.href='/api/tasks/export';toast(`Exporting ${allTasks.length} tasks…`);}
+function downloadTemplate(){window.location.href='/api/tasks/template';toast('Template downloading…');}
+
+/* ── Import (xlsx → tasks) ───────────────────────────────────────────────────
+   Two import modes are auto-detected from the xlsx column headers:
+     'full'    — full task sheet with all columns (from the template)
+     'process' — process-specific sheet with task names + volume only
+
+   setupDZ()         — bind drag-and-drop and click events on the drop zone.
+   detectMode()      — inspect header row to determine import mode.
+   handleFile(file)  — validate MIME/extension, POST to /api/tasks/parse-xlsx,
+                       render the preview table of rows with validity indicators.
+   renderImpPrev()   — build the preview table HTML.
+   confirmImport()   — POST valid rows to /api/tasks/bulk-from-process or
+                       /api/tasks/parse-xlsx (depending on mode).
+   resetImport()     — clear impRows, reset the drop zone, hide the preview.
+──────────────────────────────────────────────────────────────────────────── */
+function setupDZ(){
+  const dz=el('dropZone');
+  dz.addEventListener('dragover',e=>{e.preventDefault();dz.classList.add('drag');});
+  dz.addEventListener('dragleave',()=>dz.classList.remove('drag'));
+  dz.addEventListener('drop',e=>{e.preventDefault();dz.classList.remove('drag');const f=e.dataTransfer.files[0];if(f)handleFile(f);});
+}
+function detectMode(headers){
+  const h=headers.map(x=>String(x).toLowerCase().replace(/[^a-z]/g,''));
+  const hasP=h.some(x=>x==='process'||x==='mappingprocess');
+  const hasT=h.some(x=>x==='tasks'||x==='taskname'||x==='task');
+  const hasSR=h.some(x=>x.includes('sr')||x.includes('rfc'));
+  return hasP&&hasT&&!hasSR?'process':'full';
+}
+async function handleFile(file){
+  if(!file)return;el('fileInput').value='';
+  el('dropZone').innerHTML='<p style="font-size:1.5rem">⏳</p><p>Parsing…</p>';
+  try{
+    const fd=new FormData();fd.append('file',file);
+    const r=await fetch('/api/tasks/parse-xlsx',{method:'POST',headers:{'X-CSRF-Token':CSRF()},body:fd});
+    const d=await r.json();
+    if(!r.ok){toast(d.error||'Parse failed','error');resetDZ();return;}
+    if(!d.rows||!d.rows.length){toast('No data rows','error');resetDZ();return;}
+    impHeaderMap=d.headers.map(h=>String(h).trim().toLowerCase());
+    importRows=d.rows;importMode=detectMode(d.headers);
+    const tag=el('impModeTag');
+    tag.style.cssText=importMode==='process'?'display:block;background:#e0f2fe;color:#0369a1;border:1px solid #7dd3fc;':'display:block;background:#f0fdf4;color:#166534;border:1px solid #86efac;';
+    tag.textContent=importMode==='process'?'✔ Task-Names format detected':'✔ Full Tasks format detected';
+    renderImpPrev(d.headers,d.rows);
+  }catch(err){toast('Upload error: '+err.message,'error');resetDZ();}
+}
+function resetDZ(){el('dropZone').innerHTML='<div style="font-size:2rem">📂</div><p>Click or drag &amp; drop your .xlsx file here</p>';}
+function renderImpPrev(header,rows){
+  el('impPreviewLabel').textContent=`${rows.length} row(s) — review before importing`;
+  el('impTHead').innerHTML=header.map(h=>`<th style="padding:6px 8px;color:var(--muted);font-weight:600;white-space:nowrap">${escHtml(h)}</th>`).join('');
+  el('impTBody').innerHTML=rows.slice(0,10).map(r=>`<tr>${header.map((_,i)=>`<td style="padding:5px 8px;border-bottom:1px solid var(--border)">${escHtml(r[i]??'')}</td>`).join('')}</tr>`).join('');
+  if(rows.length>10)el('impTBody').innerHTML+=`<tr><td colspan="${header.length}" style="padding:6px 8px;color:var(--muted);text-align:center">… and ${rows.length-10} more rows</td></tr>`;
+  el('impResult').style.display='none';el('impPreview').style.display='block';
+}
+async function confirmImport(){
+  if(!importRows.length)return;
+  const btn=el('bConfirmImport');btn.disabled=true;btn.textContent='⏳ Importing…';
+  let ok=0,fail=0,errs=[];
+  const hLow=impHeaderMap.map(h=>h.replace(/[^a-z]/g,''));
+  if(importMode==='process'){
+    const iP=hLow.findIndex(h=>h==='process'||h==='mappingprocess');
+    const iT=hLow.findIndex(h=>h==='tasks'||h==='taskname'||h==='task');
+    const rows=importRows.map(r=>({process:iP>=0?String(r[iP]||'').trim():'',task_name:iT>=0?String(r[iT]||'').trim():''})).filter(r=>r.process||r.task_name);
+    try{
+      const res=await api('/api/tasks/bulk-from-process','POST',{rows});
+      const d=await res.json();
+      if(res.ok){ok=d.imported;fail=d.failed||0;errs=d.errors||[];}
+      else{fail=rows.length;errs=[d.error||'Import failed'];}
+    }catch{fail=importRows.length;errs=['Network error'];}
+  }else{
+    const col=n=>impHeaderMap.findIndex(h=>h.replace(/[^a-z]/g,'').includes(n.replace(/[^a-z]/g,'')));
+    const iSR=col('srrfc'),iPC=col('projectcode'),iPR=hLow.findIndex(h=>h.replace(/[^a-z]/g,'').includes('process'));
+    const iTN=col('taskname'),iST=col('subtask'),iAS=col('assignee');
+    const iTAT=col('tat'),iVO=col('volume'),iSD=col('startdate'),iDD=col('duedate'),iST2=col('status'),iPRI=col('priority'),iN=col('notes');
+    for(const row of importRows){
+      const g=i=>i>=0?String(row[i]||'').trim():'';
+      const sr=g(iSR),pc=g(iPC),tn=g(iTN);
+      if(!sr||!tn){fail++;errs.push('Row skipped — missing SR/RFC or Task Name');continue;}
+      const proj=allProjects.find(p=>p.project_code.toLowerCase()===pc.toLowerCase()||p.name.toLowerCase()===pc.toLowerCase());
+      if(!proj){fail++;errs.push(`"${sr}" — project "${pc}" not found`);continue;}
+      const au=allUsers.find(u=>u.username.toLowerCase()===g(iAS).toLowerCase()||u.enterprise_id.toLowerCase()===g(iAS).toLowerCase());
+      const body={sr_rfc:sr,project_id:proj.id,task_name:tn,process:g(iPR),subtask:g(iST),
+        assigned_to:au?au.id:null,turnaround_time:g(iTAT)||null,volume:parseInt(g(iVO))||1,
+        started_at:g(iSD)||null,due_date:g(iDD)||null,status:g(iST2)||'pending',priority:g(iPRI)||'medium',notes:g(iN)};
+      try{
+        const res=await api('/api/tasks','POST',body);
+        if(res.ok)ok++;else{const d=await res.json();fail++;errs.push(`"${sr}": ${d.error||'error'}`);}
+      }catch{fail++;errs.push(`"${sr}": network error`);}
+    }
+  }
+  const re=el('impResult');re.style.display='block';
+  if(!fail){Object.assign(re.style,{background:'#dcfce7',color:'#14532d',border:'1px solid #86efac'});re.textContent=`✅ All ${ok} tasks imported!`;}
+  else if(ok>0){Object.assign(re.style,{background:'#fef9c3',color:'#854d0e',border:'1px solid #fde68a'});re.innerHTML=`⚠️ ${ok} imported, ${fail} failed.<br><small>${errs.slice(0,5).map(escHtml).join('<br>')}</small>`;}
+  else{Object.assign(re.style,{background:'#fee2e2',color:'#991b1b',border:'1px solid #fca5a5'});re.innerHTML=`❌ Import failed (${fail} rows).<br><small>${errs.slice(0,5).map(escHtml).join('<br>')}</small>`;}
+  btn.disabled=false;btn.textContent='✓ Import All Rows';
+  if(ok>0)await Promise.all([loadTasks(),loadStats()]);
+}
+function resetImport(){
+  importRows=[];impHeaderMap=[];importMode='full';
+  el('impPreview').style.display='none';el('impResult').style.display='none';
+  el('impModeTag').style.display='none';el('fileInput').value='';resetDZ();
+}
+
+/* ── Keyboard shortcuts ──────────────────────────────────────────────────────
+   initKB() — binds keyboard shortcuts:
+     n   → open New Task modal
+     /   → focus the global search input
+     Esc → close the topmost open modal
+──────────────────────────────────────────────────────────────────────────── */
+/* ── SSE real-time push ──────────────────────────────────────────────────────
+   initSSE() — opens EventSource('/api/stream').
+
+   Events:
+     task_created → reload all tasks so the new row appears immediately.
+     task_updated → patch the matching entry in allTasks[] and re-render
+                    only the affected row (no full reload).
+     task_deleted → splice the task out of allTasks[] and re-render.
+     connected    → log the SSE session ID (for debugging multi-tab scenarios).
+
+   On error: close the EventSource and reconnect after 5 seconds.
+   The SSE indicator dot in the top bar reflects connection state:
+     green = connected, orange = reconnecting, grey = error.
+──────────────────────────────────────────────────────────────────────────── */
+function initSSE(){
+  const dot=el('sseDot'),lbl=el('sseLabel');
+  let es,retryT;
+  function setStatus(live){
+    if(dot)dot.classList.toggle('live',live);
+    if(lbl)lbl.textContent=live?'live':'reconnecting…';
+  }
+  function connect(){
+    es=new EventSource('/api/stream');
+    es.onopen=()=>setStatus(true);
+    es.addEventListener('task_created',e=>{
+      const d=JSON.parse(e.data);
+      if(!allTasks.find(t=>t.id===d.task.id)){allTasks.unshift(d.task);applyFilters();}
+      toast(`New task: ${d.task.study_id}`);loadStats();
+    });
+    es.addEventListener('task_updated',e=>{
+      const d=JSON.parse(e.data);
+      const i=allTasks.findIndex(t=>t.id===d.task.id);
+      if(i>=0)allTasks[i]=d.task;applyFilters();loadStats();
+    });
+    es.addEventListener('task_deleted',e=>{
+      const d=JSON.parse(e.data);
+      allTasks=allTasks.filter(t=>t.id!==d.task_id);applyFilters();loadStats();
+    });
+    es.onerror=()=>{
+      setStatus(false);
+      es.close();clearTimeout(retryT);
+      retryT=setTimeout(connect,5000);
+    };
+  }
+  connect();
+}
+
+function initKB(){
+  // Keyboard shortcuts:
+  //   Esc         → close all open modals + clear selection
+  //   n / N       → open New Task modal
+  //   /           → focus the global search input
+  //   k / K       → toggle kanban ↔ table view
+  //   r / R       → refresh all data
+  //   Ctrl/⌘+E   → export visible tasks to xlsx
+  document.addEventListener('keydown',e=>{
+    const tag=document.activeElement.tagName;
+    const inp=['INPUT','SELECT','TEXTAREA'].includes(tag);
+    if(e.key==='Escape'){
+      document.querySelectorAll('.overlay.open').forEach(o=>o.classList.remove('open'));
+      clearSel();return;
+    }
+    if(inp)return;
+    if(e.key==='n'||e.key==='N'){e.preventDefault();openNewTask();return;}
+    if(e.key==='/'){e.preventDefault();el('gSearch').focus();el('gSearch').select();return;}
+    if(e.key==='k'||e.key==='K'){e.preventDefault();setView(currentView==='kanban'?'table':'kanban');return;}
+    if(e.key==='r'||e.key==='R'){e.preventDefault();refreshAll();return;}
+    if((e.ctrlKey||e.metaKey)&&(e.key==='e'||e.key==='E')){e.preventDefault();exportExcel();return;}
+  });
+}
+
+/* ── Modal click-outside ─────────────────────────────────────────────────────
+   _mdt tracks the mousedown target so that click-drag from inside the modal
+   box out to the overlay does not accidentally close the modal.
+──────────────────────────────────────────────────────────────────────────── */
+let _mdt=null;
+document.addEventListener('mousedown',e=>{_mdt=e.target;});
+document.querySelectorAll('.overlay').forEach(ov=>{
+  ov.addEventListener('click',e=>{
+    if(e.target===ov&&_mdt===ov){ov.classList.remove('open');if(ov.id==='mImport')resetImport();}
+  });
+});
+
+/* ── Live clock ──────────────────────────────────────────────────────────────
+   Self-contained IIFE ticks every second to update the top-bar HH:MM:SS and
+   full date label.  No global variable needed.
+──────────────────────────────────────────────────────────────────────────── */
+(function(){
+  function tick(){
+    const now=new Date(),h=now.getHours(),m=now.getMinutes(),s=now.getSeconds();
+    const pad=n=>String(n).padStart(2,'0');
+    const ampm=h>=12?'PM':'AM',h12=h%12||12;
+    const D=['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+    const M=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    const te=el('tcTime'),de=el('tcDate');
+    if(te)te.textContent=`${pad(h12)}:${pad(m)}:${pad(s)} ${ampm}`;
+    if(de)de.textContent=`${D[now.getDay()]}, ${M[now.getMonth()]} ${now.getDate()}, ${now.getFullYear()}`;
+  }
+  tick();setInterval(tick,1000);
+})();
+
+// Kick off the portal — fetches all data, starts SSE, restores URL filter state.
+init();
+</script>
+</body>
+</html>

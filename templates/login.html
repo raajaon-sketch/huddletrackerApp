@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="csrf-token" content="{{ csrf_token() }}">
+<title>Huddle Tracker – Sign In</title>
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Sans:ital,wght@0,300;0,400;0,500;1,300&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --ink: #0a0a0f;
+    --paper: #f5f3ee;
+    --accent: #ff4d2e;
+    --accent2: #1a1a2e;
+    --muted: #888;
+    --card: #ffffff;
+    --border: #e0ddd6;
+  }
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: 'DM Sans', sans-serif;
+    background: var(--paper);
+    min-height: 100vh;
+    display: flex;
+    overflow: hidden;
+  }
+  /* Left panel – geometric art */
+  .art-panel {
+    width: 50%;
+    background: var(--ink);
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    flex-shrink: 0;
+  }
+  .art-panel::before {
+    content: '';
+    position: absolute;
+    width: 600px; height: 600px;
+    border-radius: 50%;
+    background: radial-gradient(circle, #ff4d2e22 0%, transparent 70%);
+    animation: pulse 4s ease-in-out infinite;
+  }
+  @keyframes pulse { 0%,100%{transform:scale(1)} 50%{transform:scale(1.15)} }
+  .grid-lines {
+    position: absolute;
+    inset: 0;
+    background-image:
+      linear-gradient(rgba(255,255,255,.04) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255,255,255,.04) 1px, transparent 1px);
+    background-size: 40px 40px;
+  }
+  .art-content { position: relative; text-align: center; color: white; padding: 40px; }
+  .art-logo {
+    font-family: 'Syne', sans-serif;
+    font-size: 3.5rem;
+    font-weight: 800;
+    letter-spacing: -2px;
+    line-height: 1;
+    margin-bottom: 16px;
+  }
+  .art-logo span { color: var(--accent); }
+  .art-tagline {
+    font-size: 1rem;
+    color: rgba(255,255,255,.5);
+    font-weight: 300;
+    letter-spacing: 3px;
+    text-transform: uppercase;
+  }
+  .floating-shapes {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+  }
+  .shape {
+    position: absolute;
+    border: 1px solid rgba(255,77,46,.3);
+    animation: floatShape 8s ease-in-out infinite;
+  }
+  .shape:nth-child(1) { width:80px;height:80px;top:15%;left:10%;animation-delay:0s; }
+  .shape:nth-child(2) { width:50px;height:50px;top:70%;left:20%;animation-delay:2s;border-radius:50%; }
+  .shape:nth-child(3) { width:120px;height:120px;top:20%;right:8%;animation-delay:1s;transform:rotate(45deg); }
+  .shape:nth-child(4) { width:30px;height:30px;bottom:20%;right:15%;animation-delay:3s;border-radius:50%; }
+  @keyframes floatShape {
+    0%,100%{transform:translateY(0) rotate(0deg)}
+    50%{transform:translateY(-20px) rotate(180deg)}
+  }
+
+  /* Right panel – form */
+  .form-panel {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 60px 80px;
+  }
+  .form-container { width: 100%; max-width: 400px; }
+  .form-title {
+    font-family: 'Syne', sans-serif;
+    font-size: 2rem;
+    font-weight: 700;
+    color: var(--ink);
+    margin-bottom: 8px;
+  }
+  .form-sub {
+    color: var(--muted);
+    font-size: .95rem;
+    margin-bottom: 40px;
+  }
+  .field { margin-bottom: 20px; }
+  label {
+    display: block;
+    font-size: .8rem;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--ink);
+    margin-bottom: 8px;
+  }
+  input {
+    width: 100%;
+    padding: 14px 16px;
+    border: 1.5px solid var(--border);
+    border-radius: 8px;
+    font-family: 'DM Sans', sans-serif;
+    font-size: .95rem;
+    background: var(--card);
+    transition: border-color .2s, box-shadow .2s;
+    outline: none;
+  }
+  input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(255,77,46,.1); }
+  .btn-login {
+    width: 100%;
+    padding: 15px;
+    background: var(--ink);
+    color: white;
+    border: none;
+    border-radius: 8px;
+    font-family: 'Syne', sans-serif;
+    font-size: 1rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background .2s, transform .1s;
+    margin-top: 8px;
+    letter-spacing: .5px;
+  }
+  .btn-login:hover { background: var(--accent); transform: translateY(-1px); }
+  .btn-login:active { transform: translateY(0); }
+  .error-msg {
+    background: #fff0ed;
+    border: 1px solid #ffb8aa;
+    color: var(--accent);
+    padding: 12px 16px;
+    border-radius: 8px;
+    font-size: .9rem;
+    margin-top: 16px;
+    display: none;
+  }
+  .demo-creds {
+    margin-top: 32px;
+    padding: 16px;
+    background: var(--ink);
+    border-radius: 8px;
+    color: rgba(255,255,255,.6);
+    font-size: .8rem;
+  }
+  .demo-creds strong { color: white; }
+  .cred-row { display: flex; justify-content: space-between; margin-top: 6px; }
+  @media(max-width:768px){
+    .art-panel{display:none}
+    .form-panel{padding:40px 24px}
+  }
+</style>
+</head>
+<body>
+<div class="art-panel">
+  <div class="grid-lines"></div>
+  <div class="floating-shapes">
+    <div class="shape"></div>
+    <div class="shape"></div>
+    <div class="shape"></div>
+    <div class="shape"></div>
+  </div>
+  <div class="art-content">
+    <div class="art-logo">Huddle<span>.</span></div>
+    <div class="art-tagline">Task & Project Tracker</div>
+  </div>
+</div>
+
+<div class="form-panel">
+  <div class="form-container">
+    <div class="form-title">Welcome back</div>
+    <div class="form-sub">Sign in to your workspace</div>
+
+    <div class="field">
+      <label>Username</label>
+      <input type="text" id="username" placeholder="Enter username" autocomplete="username">
+    </div>
+    <div class="field">
+      <label>Password</label>
+      <input type="password" id="password" placeholder="••••••••" autocomplete="current-password">
+    </div>
+    <button class="btn-login" onclick="doLogin()">Sign In →</button>
+    <div class="error-msg" id="errMsg">Invalid username or password.</div>
+
+    {% if show_demo %}
+    <div class="demo-creds">
+      <strong>Demo Credentials</strong>
+      <div class="cred-row"><span>Admin</span><span>admin / Admin@1234</span></div>
+      <div class="cred-row"><span>Lead</span><span>lead1 / Lead@1234</span></div>
+      <div class="cred-row"><span>Member</span><span>member1 / Member@1234</span></div>
+    </div>
+    {% endif %}
+  </div>
+</div>
+
+<script>
+async function doLogin() {
+  const un = document.getElementById('username').value.trim();
+  const pw = document.getElementById('password').value;
+  const err = document.getElementById('errMsg');
+  err.style.display = 'none';
+  if (!un || !pw) { err.textContent = 'Please fill all fields.'; err.style.display = 'block'; return; }
+  const res = await fetch('/login', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({username: un, password: pw})
+  });
+  if (res.ok) {
+    const d = await res.json();
+    // SEC-03 FIX: CSRF token is already in the <meta> tag rendered server-side.
+    // Do NOT store it in sessionStorage (readable by any JS on the page via XSS).
+    window.location.href = '/portal';
+  } else {
+    const d = await res.json();
+    err.textContent = d.message || 'Login failed.';
+    err.style.display = 'block';
+  }
+}
+document.addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); });
+</script>
+</body>
+</html>
